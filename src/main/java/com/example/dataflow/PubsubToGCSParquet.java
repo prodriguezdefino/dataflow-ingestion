@@ -230,7 +230,7 @@ public class PubsubToGCSParquet {
     void setComposeTempDirectory(ValueProvider<String> value);
 
     @Description("The filename prefix of the files to write to.")
-    @Default.String("_test_")
+    @Default.String("prefix-name")
     ValueProvider<String> getOutputFilenamePrefix();
 
     void setOutputFilenamePrefix(ValueProvider<String> value);
@@ -271,7 +271,7 @@ public class PubsubToGCSParquet {
     void setCreateSuccessFile(Boolean value);
 
     @Description("Composes multiple small files into bigger ones (Only GCS destination)")
-    @Default.Boolean(true)
+    @Default.Boolean(false)
     Boolean getComposeSmallFiles();
 
     void setComposeSmallFiles(Boolean value);
