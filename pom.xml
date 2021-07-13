@@ -56,12 +56,12 @@
   </dependencyManagement>
     
   <dependencies>
-    <!-- Adds a dependency on the Beam SDK. -->
-    <!--dependency>
+    <!-- Makes the DataflowRunner available when running a pipeline. -->
+    <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-core</artifactId>
+      <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
       <version>${beam.version}</version>
-    </dependency-->
+    </dependency>
 
     <!-- Adds a dependency on the Beam Google Cloud Platform IO module. -->
     <dependency>
@@ -109,39 +109,8 @@
       <version>4.13</version>
       <scope>test</scope>
     </dependency>
-
   </dependencies>
 
-  <profiles>
-    <profile>
-      <id>direct-runner</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <!-- Makes the DirectRunner available when running a pipeline. -->
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-direct-java</artifactId>
-          <version>${beam.version}</version>
-          <scope>runtime</scope>
-        </dependency>
-      </dependencies>
-    </profile>
-    <profile>
-      <id>dataflow-runner</id>
-      <!-- Makes the DataflowRunner available when running a pipeline. -->
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
-          <version>${beam.version}</version>
-          <scope>runtime</scope>
-        </dependency>
-      </dependencies>
-    </profile>
-  </profiles>
-  
   <build>
     <resources>
       <resource>

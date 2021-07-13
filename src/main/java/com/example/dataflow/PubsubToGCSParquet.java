@@ -42,6 +42,7 @@ import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.io.JsonDecoder;
 import org.apache.avro.reflect.Nullable;
 import org.apache.beam.repackaged.core.org.apache.commons.lang3.RandomStringUtils;
+import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroCoder;
@@ -209,7 +210,7 @@ public class PubsubToGCSParquet {
    * <p>
    * Inherits standard configuration options.
    */
-  public interface PStoGCSParquetOptions extends PipelineOptions {
+  public interface PStoGCSParquetOptions extends PipelineOptions, DataflowPipelineOptions {
 
     @Description("The Cloud Pub/Sub subscription to read from.")
     @Validation.Required
