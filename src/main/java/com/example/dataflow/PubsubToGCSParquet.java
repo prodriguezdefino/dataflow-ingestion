@@ -26,6 +26,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
@@ -53,6 +55,7 @@ import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.WriteFilesResult;
+import org.apache.beam.sdk.io.fs.CreateOptions;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
@@ -76,6 +79,7 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.Values;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
@@ -91,7 +95,12 @@ import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.io.DelegatingSeekableInputStream;
+import org.apache.parquet.io.InputFile;
+import org.apache.parquet.io.SeekableInputStream;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -104,11 +113,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * This pipeline ingests incoming JSON data from a Cloud Pub/Sub topic and outputs the data into windowed Parquet files in the specified
- * output directory.
+ * This pipeline ingests incoming data from a Cloud Pub/Sub topic and outputs the raw data into windowed Avro files at the specified output
+ * directory.
  *
  * <p>
- * Files output will have the following AVRO schema:
+ * Files output will have the following schema:
  *
  * <pre>
  *   {
@@ -202,7 +211,7 @@ public class PubsubToGCSParquet {
           + "         {\"name\": \"about5\", \"type\": \"string\"}\n"
           + "       ]\n"
           + "    }";
-  private static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
+  static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
 
   /**
    * Options supported by the pipeline.
@@ -210,7 +219,7 @@ public class PubsubToGCSParquet {
    * <p>
    * Inherits standard configuration options.
    */
-  public interface PStoGCSParquetOptions extends PipelineOptions, DataflowPipelineOptions {
+  public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
 
     @Description("The Cloud Pub/Sub subscription to read from.")
     @Validation.Required
@@ -271,7 +280,7 @@ public class PubsubToGCSParquet {
     void setCreateSuccessFile(Boolean value);
 
     @Description("Composes multiple small files into bigger ones (Only GCS destination)")
-    @Default.Boolean(false)
+    @Default.Boolean(true)
     Boolean getComposeSmallFiles();
 
     void setComposeSmallFiles(Boolean value);
@@ -345,8 +354,6 @@ public class PubsubToGCSParquet {
                             .withSink(ParquetIO
                                     .sink(AVRO_SCHEMA)
                                     .withCompressionCodec(CompressionCodecName.SNAPPY))
-                            .withComposeSmallFiles(options.getComposeSmallFiles())
-                            .withCleanComposePartFiles(options.getCleanComposePartFiles())
                             .withDataToIngestTag(dataToIngest)
                             .withDataOnWindowSignalsTag(dataOnWindowSignals)
                             .withComposeTempDirectory(options.getComposeTempDirectory())
@@ -822,10 +829,7 @@ public class PubsubToGCSParquet {
           return false;
         }
         final ComposeContext other = (ComposeContext) obj;
-        if (!Objects.equals(this.partFiles, other.partFiles)) {
-          return false;
-        }
-        return true;
+        return Objects.equals(this.partFiles, other.partFiles);
       }
 
       @Override
@@ -1053,6 +1057,12 @@ public class PubsubToGCSParquet {
       private static final Logger LOG = LoggerFactory.getLogger(ComposeFiles.class);
       private Storage storage;
       private String bucketName;
+      private SerializableFunction<Void, FileIO.Sink<GenericRecord>> sinkProvider;
+
+      public ComposeFiles withSinkProvider(SerializableFunction<Void, FileIO.Sink<GenericRecord>> sinkProvider) {
+        this.sinkProvider = sinkProvider;
+        return this;
+      }
 
       @StartBundle
       public void start(PipelineOptions options) {
@@ -1063,6 +1073,11 @@ public class PubsubToGCSParquet {
 
       @ProcessElement
       public void processElement(ProcessContext context) throws IOException {
+        //processElementGCSCompose(context);
+        processElementParquetCompose(context);
+      }
+
+      private void processElementGCSCompose(ProcessContext context) {
         LOG.debug("Files to compose: {}", context.element());
 
         Long startTime = System.currentTimeMillis();
@@ -1090,6 +1105,70 @@ public class PubsubToGCSParquet {
                           null,
                           context.element().composedTempFile,
                           context.element().partFiles));
+        }
+      }
+
+      private void processElementParquetCompose(ProcessContext context) {
+        FileIO.Sink<GenericRecord> sink = this.sinkProvider.apply(null);
+
+        composeParquetFiles(sink, context.element().composedTempFile, context.element().partFiles, Compression.SNAPPY);
+
+      }
+
+      private static class BeamParquetInputFile implements InputFile {
+
+        private final SeekableByteChannel seekableByteChannel;
+
+        BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
+          this.seekableByteChannel = seekableByteChannel;
+        }
+
+        @Override
+        public long getLength() throws IOException {
+          return seekableByteChannel.size();
+        }
+
+        @Override
+        public SeekableInputStream newStream() {
+          return new DelegatingSeekableInputStream(Channels.newInputStream(seekableByteChannel)) {
+
+            @Override
+            public long getPos() throws IOException {
+              return seekableByteChannel.position();
+            }
+
+            @Override
+            public void seek(long newPos) throws IOException {
+              seekableByteChannel.position(newPos);
+            }
+          };
+        }
+      }
+
+      static void composeParquetFiles(
+              FileIO.Sink<GenericRecord> sink, String destinationPath, Iterable<String> composeParts, Compression compression) {
+
+        try ( WritableByteChannel writeChannel = FileSystems.create(
+                FileSystems.matchNewResource(destinationPath, false),
+                CreateOptions.StandardCreateOptions.builder().setMimeType("").build())) {
+          sink.open(writeChannel);
+
+          for (String partStr : composeParts) {
+            ResourceId resource = FileSystems.matchSingleFileSpec(partStr).resourceId();
+            AvroParquetReader.Builder<GenericRecord> readerBuilder
+                    = AvroParquetReader.<GenericRecord>builder(
+                            new BeamParquetInputFile(
+                                    (SeekableByteChannel) compression.readDecompressed(FileSystems.open(resource))));
+            try ( ParquetReader<GenericRecord> reader = readerBuilder.build()) {
+              GenericRecord read;
+              while ((read = reader.read()) != null) {
+                sink.write(read);
+              }
+            }
+          }
+          sink.flush();
+        } catch (IOException ex) {
+          throw new RuntimeException("Errors while trying to compose Parquet files.", ex);
         }
       }
 
@@ -1249,7 +1328,7 @@ public class PubsubToGCSParquet {
 
       StringBuilder fileNameSB = new StringBuilder(outputPath);
 
-      if (!filePrefix.get().isBlank()) {
+      if (!filePrefix.get().isEmpty()) {
         fileNameSB.append(filePrefix.get());
       }
 
@@ -1257,7 +1336,7 @@ public class PubsubToGCSParquet {
               .append("-shard-").append(shardIndex).append("-of-").append(numShards)
               .append("-exec-").append(exec);
 
-      if (!fileSuffix.get().isBlank()) {
+      if (!fileSuffix.get().isEmpty()) {
         fileNameSB.append(fileSuffix.get());
       }
 
