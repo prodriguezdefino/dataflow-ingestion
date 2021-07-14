@@ -281,7 +281,7 @@ public class PubsubToGCSParquet {
     void setCreateSuccessFile(Boolean value);
 
     @Description("Composes multiple small files into bigger ones (Only GCS destination)")
-    @Default.Boolean(true)
+    @Default.Boolean(false)
     Boolean getComposeSmallFiles();
 
     void setComposeSmallFiles(Boolean value);
@@ -358,6 +358,8 @@ public class PubsubToGCSParquet {
                             .withDataToIngestTag(dataToIngest)
                             .withDataOnWindowSignalsTag(dataOnWindowSignals)
                             .withComposeTempDirectory(options.getComposeTempDirectory())
+                            .withComposeSmallFiles(options.getComposeSmallFiles())
+                            .withCleanComposePartFiles(options.getCleanComposePartFiles())
                             .withNumShards(options.getNumShards())
                             .withOutputDirectory(options.getOutputDirectory())
                             .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
@@ -437,7 +439,7 @@ public class PubsubToGCSParquet {
     private ValueProvider<String> tempDirectory;
     private String windowDuration;
     private Integer numShards = 400;
-    private Boolean composeSmallFiles = true;
+    private Boolean composeSmallFiles = false;
     private ValueProvider<String> composeTempDirectory;
     private ValueProvider<String> outputDirectory;
     private Boolean cleanComposePartFiles = true;
@@ -711,7 +713,7 @@ public class PubsubToGCSParquet {
                 .collect(Collectors.toList());
 
         if (files.size() > 0) {
-          createSuccessFileInFilesDir(files.get(0));
+          createSuccessFileInPath(files.get(0), true);
           context.output((Void) null);
         }
       }
@@ -1297,8 +1299,10 @@ public class PubsubToGCSParquet {
           } else {
             outputPath = outputPath + buildPartitionedPathFromDatetime(Instant.now().toDateTime());
           }
+          // remove trailing /
+          outputPath = outputPath.endsWith("/") ? outputPath.substring(0, outputPath.length() - 1) : outputPath;
           LOG.debug("Will create SUCCESS file at {}", outputPath);
-          createSuccessFileInFilesDir(outputPath);
+          createSuccessFileInPath(outputPath, false);
         }
       }
     }
@@ -1408,8 +1412,9 @@ public class PubsubToGCSParquet {
     return duration;
   }
 
-  private static void createSuccessFileInFilesDir(String file) {
-    ResourceId dirResourceFiles = FileSystems.matchNewResource(file, false).getCurrentDirectory();
+  private static void createSuccessFileInPath(String path, boolean isFile) {
+    LOG.info("received path {} and isFile {}.", path, isFile);
+    ResourceId dirResourceFiles = FileSystems.matchNewResource(path, isFile).getCurrentDirectory();
     ResourceId successFile = dirResourceFiles
             .resolve("SUCCESS", ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
 
