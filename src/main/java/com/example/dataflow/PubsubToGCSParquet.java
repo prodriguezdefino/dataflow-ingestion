@@ -234,6 +234,7 @@ public class PubsubToGCSParquet {
     void setOutputDirectory(ValueProvider<String> value);
 
     @Description("The directory to output temp files to, used when composing files. Must end with a slash.")
+    @Default.String("NA")
     ValueProvider<String> getComposeTempDirectory();
 
     void setComposeTempDirectory(ValueProvider<String> value);
@@ -539,10 +540,6 @@ public class PubsubToGCSParquet {
       checkArgument(sink != null, "A fully configured Sink should be provided using withSink method.");
       checkArgument(dataOnWindowSignals != null && dataToIngest != null,
               "Proper TupleTags must be configured for this transform unsing with*Tag method.");
-      if (composeSmallFiles) {
-        checkArgument(composeTempDirectory.get() != null,
-                "When composing files a temp location should be configured in option --composeTempDirectory");
-      }
     }
 
     @Override
@@ -550,6 +547,11 @@ public class PubsubToGCSParquet {
       // check if the expected tags are included in the PCollectionTuple
       if (!input.has(dataOnWindowSignals) || !input.has(dataToIngest)) {
         throw new IllegalArgumentException("Writes to GCS expects 2 tuple tags on PCollection (data to ingest and signals on windows).");
+      }
+
+      if (composeSmallFiles && composeTempDirectory.isAccessible()) {
+        checkArgument(composeTempDirectory.get() != null,
+                "When composing files a temp location should be configured in option --composeTempDirectory");
       }
 
       // create the naming strategy for created files
