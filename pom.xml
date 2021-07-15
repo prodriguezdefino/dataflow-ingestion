@@ -80,12 +80,7 @@
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-core</artifactId>
-      <version>0.20.2</version>
-    </dependency>
-    
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-storage</artifactId>
+      <version>1.2.1</version>
     </dependency>
 
     <!-- Add slf4j API frontend binding with JUL backend -->
