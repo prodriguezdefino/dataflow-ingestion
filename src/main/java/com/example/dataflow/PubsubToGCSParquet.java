@@ -281,13 +281,19 @@ public class PubsubToGCSParquet {
 
     void setCreateSuccessFile(Boolean value);
 
-    @Description("Composes multiple small files into bigger ones (Only GCS destination)")
+    @Description("Enables composition of multiple small files into bigger ones (Parquet support included in this pipeline)")
     @Default.Boolean(false)
     Boolean getComposeSmallFiles();
 
     void setComposeSmallFiles(Boolean value);
 
-    @Description("Cleans all files part after composing them (Only GCS destination)")
+    @Description("")
+    @Default.Integer(10)
+    Integer getFileCountPerCompose();
+
+    void setFileCountPerCompose(Integer value);
+
+    @Description("Cleans all files part after composing them (Parquet support included in this pipeline)")
     @Default.Boolean(true)
     Boolean getCleanComposePartFiles();
 
@@ -362,6 +368,7 @@ public class PubsubToGCSParquet {
                             .withComposeTempDirectory(options.getComposeTempDirectory())
                             .withComposeSmallFiles(options.getComposeSmallFiles())
                             .withCleanComposePartFiles(options.getCleanComposePartFiles())
+                            .withFileCountPerCompose(options.getFileCountPerCompose())
                             .withNumShards(options.getNumShards())
                             .withOutputDirectory(options.getOutputDirectory())
                             .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
@@ -440,6 +447,7 @@ public class PubsubToGCSParquet {
     private ValueProvider<String> tempDirectory;
     private String windowDuration;
     private Integer numShards = 400;
+    private Integer fileCountPerCompose = 10;
     private Boolean composeSmallFiles = false;
     private ValueProvider<String> composeTempDirectory;
     private ValueProvider<String> outputDirectory;
@@ -482,6 +490,11 @@ public class PubsubToGCSParquet {
 
     public WriteFormatToGCS<DataT> withNumShards(Integer numShards) {
       this.numShards = numShards;
+      return this;
+    }
+
+    public WriteFormatToGCS<DataT> withFileCountPerCompose(Integer fileCountPerCompose) {
+      this.fileCountPerCompose = fileCountPerCompose;
       return this;
     }
 
@@ -589,6 +602,7 @@ public class PubsubToGCSParquet {
                         .withFileSuffix(outputFilenameSuffix)
                         .withOriginalNumShards(numShards)
                         .withOutputPath(outputDirectory)
+                        .withFileCountPerCompose(fileCountPerCompose)
                         .withSinkProvider(sinkProvider);
 
         // check if we don't need to clean composing parts
@@ -737,7 +751,7 @@ public class PubsubToGCSParquet {
    */
   static class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
 
-    private Integer fileCountPerCompose = 32;
+    private Integer fileCountPerCompose = 100;
     private ValueProvider<String> outputPath;
     private ValueProvider<String> filePrefix;
     private ValueProvider<String> fileSuffix;
