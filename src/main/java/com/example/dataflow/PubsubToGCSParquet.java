@@ -50,7 +50,6 @@ import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
-import org.apache.beam.sdk.extensions.gcp.util.gcsfs.GcsPath;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.FileSystems;
@@ -77,13 +76,10 @@ import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
-import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.Reshuffle;
-import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.Values;
 import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -591,7 +587,7 @@ public class PubsubToGCSParquet {
                         .withFileNaming(naming)
                         .withFilePrefix(outputFilenamePrefix)
                         .withFileSuffix(outputFilenameSuffix)
-                        .withNumShards(numShards)
+                        .withOriginalNumShards(numShards)
                         .withOutputPath(outputDirectory)
                         .withSinkProvider(sinkProvider);
 
@@ -670,13 +666,10 @@ public class PubsubToGCSParquet {
 
       return input
               // wait for all the files in the current window
-              //.apply("CombineFilesInWindow",
-//                      Combine.globally(CombineFilesNamesInList.create())
-//                              .withFanout(numShards)
-//                              .withoutDefaults())
-              .apply(WithKeys.of((Void)null))
-              .apply(GroupByKey.create())
-              .apply(Values.create())
+              .apply("CombineFilesInWindow",
+                      Combine.globally(CombineFilesNamesInList.create())
+                              .withFanout(numShards)
+                              .withoutDefaults())
               .apply("CreateSuccessFile", ParDo.of(new SuccessFileWriteDoFn()));
     }
 
@@ -744,9 +737,7 @@ public class PubsubToGCSParquet {
    */
   static class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
 
-    // max supported by compose method in GCS
-    private static final Integer MAX_FILES_IN_COMPOSE_BUNDLE = 32;
-
+    private Integer fileCountPerCompose = 32;
     private ValueProvider<String> outputPath;
     private ValueProvider<String> filePrefix;
     private ValueProvider<String> fileSuffix;
@@ -787,8 +778,13 @@ public class PubsubToGCSParquet {
       return this;
     }
 
-    public ComposeGCSFiles<KeyT, DataT> withNumShards(Integer numShards) {
+    public ComposeGCSFiles<KeyT, DataT> withOriginalNumShards(Integer numShards) {
       this.numShards = numShards;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withFileCountPerCompose(Integer fileCount) {
+      this.fileCountPerCompose = fileCount;
       return this;
     }
 
@@ -805,6 +801,7 @@ public class PubsubToGCSParquet {
               "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     public PCollection<String> expand(PCollection<String> input) {
       // registering coder for context object
@@ -821,25 +818,31 @@ public class PubsubToGCSParquet {
               .apply("ToReadable", FileIO.readMatches())
               // group into batches
               .apply(WithKeys.of((Void) null))
-              .apply("GroupIntoBatches", GroupIntoBatches.ofSize(MAX_FILES_IN_COMPOSE_BUNDLE))
+              .apply("GroupIntoBatches", GroupIntoBatches.ofSize(
+                      numShards <= fileCountPerCompose ? numShards : fileCountPerCompose))
               // create the file bundles that will compone the composed files
-              .apply("CreateComposeBundles", ParDo.of(new CreateComposeBundles<>(naming, numShards)))
+              .apply("CreateComposeBundles", ParDo.of(
+                      new CreateComposeBundles<>(naming, numShards, fileCountPerCompose)))
               // materialize this results, making bundles stable
-              .apply("ReshuffleBundles", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleBundles",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // create the composed temp files
               .apply("ComposeTemporaryFiles",
                       ParDo.of(new ComposeFiles<DataT>()
                               .withSinkProvider(sinkProvider)))
               // materialize the temp files, will reuse same temp files in retries later on 
-              .apply("ReshuffleTemps", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleTemps",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // move the composed files to their destination
               .apply("CopyToDestination", ParDo.of(new CopyToDestination(outputPath, naming)))
               // materialize destination files
-              .apply("ReshuffleDests", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleDests",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // clean all the previous parts if configured to 
               .apply("Cleanup", ParDo.of(new CleanupFiles(cleanParts)))
               // materialize compose file results
-              .apply("ReshuffleResults", Reshuffle.<String>viaRandomKey());
+              .apply("ReshuffleResults",
+                      org.apache.beam.sdk.transforms.Reshuffle.<String>viaRandomKey());
     }
 
     /**
@@ -1061,11 +1064,11 @@ public class PubsubToGCSParquet {
       @StateId("currentNumShard")
       private final StateSpec<ValueState<Integer>> currentNumShard = StateSpecs.value();
 
-      public CreateComposeBundles(WindowedFileNaming naming, Integer numShards) {
+      public CreateComposeBundles(WindowedFileNaming naming, Integer originalNumShards, Integer filesPerCompose) {
         this.naming = naming;
-        this.totalBundles = numShards % MAX_FILES_IN_COMPOSE_BUNDLE == 0
-                ? numShards / MAX_FILES_IN_COMPOSE_BUNDLE
-                : (numShards / MAX_FILES_IN_COMPOSE_BUNDLE) + 1;
+        this.totalBundles = originalNumShards % filesPerCompose == 0
+                ? originalNumShards / filesPerCompose
+                : (originalNumShards / filesPerCompose) + 1;
       }
 
       @StartBundle
@@ -1130,7 +1133,7 @@ public class PubsubToGCSParquet {
                 (ParquetIO.Sink) sinkProvider.apply(),
                 composeCtx.composedTempFile,
                 composeCtx.partFiles);
-        LOG.info("Copied temp file in {}ms", System.currentTimeMillis() - startTime);
+        LOG.info("Composed temp file in {}ms", System.currentTimeMillis() - startTime);
 
         context.output(
                 ComposeContext.of(
@@ -1176,16 +1179,19 @@ public class PubsubToGCSParquet {
               String destinationPath,
               Iterable<FileIO.ReadableFile> composeParts) {
 
+        LOG.debug("Writing into file {}", destinationPath);
+
         try ( WritableByteChannel writeChannel
                 = FileSystems.create(
                         FileSystems.matchNewResource(destinationPath, false),
                         CreateOptions.StandardCreateOptions.builder().setMimeType("").build())) {
           sink.open(writeChannel);
 
-          for (FileIO.ReadableFile partStr : composeParts) {
+          for (FileIO.ReadableFile readablePart : composeParts) {
+            LOG.debug("Composing data from {}", readablePart.getMetadata().resourceId());
             AvroParquetReader.Builder<GenericRecord> readerBuilder
                     = AvroParquetReader.<GenericRecord>builder(
-                            new BeamParquetInputFile(partStr.openSeekable()));
+                            new BeamParquetInputFile(readablePart.openSeekable()));
             try ( ParquetReader<GenericRecord> reader = readerBuilder.build()) {
               GenericRecord read;
               while ((read = reader.read()) != null) {
@@ -1193,7 +1199,7 @@ public class PubsubToGCSParquet {
               }
             } catch (Exception ex) {
               LOG.error("Error while composing files.", ex);
-              LOG.warn("Tried to compose file {} but failed, skipping.", partStr.getMetadata().resourceId().getFilename());
+              LOG.warn("Tried to compose using file {} but failed, skipping.", readablePart.getMetadata().resourceId().getFilename());
             }
           }
           sink.flush();
