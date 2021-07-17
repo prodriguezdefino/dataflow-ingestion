@@ -1496,13 +1496,12 @@ public class PubsubToGCSParquet {
   private static void createSuccessFileInPath(String path, boolean isDirectory) {
     // remove trailing / if exists since is not supported at the FileSystems level
     path = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
-    LOG.info("received path {} and isDirectory {}.", path, isDirectory);
 
     ResourceId dirResourceFiles = FileSystems.matchNewResource(path, isDirectory).getCurrentDirectory();
     ResourceId successFile = dirResourceFiles
             .resolve("SUCCESS", ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
 
-    LOG.info("Will create success file in path {}.", successFile.toString());
+    LOG.debug("Will create success file in path {}.", successFile.toString());
     try ( WritableByteChannel writeChannel = FileSystems.create(successFile, MimeTypes.TEXT)) {
       writeChannel.write(ByteBuffer.wrap(" ".getBytes()));
     } catch (IOException ex) {
