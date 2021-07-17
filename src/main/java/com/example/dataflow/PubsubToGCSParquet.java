@@ -15,19 +15,19 @@
  */
 package com.example.dataflow;
 
-import com.google.cloud.storage.Blob;
-import com.google.cloud.storage.BlobId;
-import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
-import com.google.cloud.storage.StorageException;
-import com.google.cloud.storage.StorageOptions;
 import com.google.common.base.MoreObjects;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.Serializable;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -40,19 +40,24 @@ import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.io.JsonDecoder;
-import org.apache.avro.reflect.Nullable;
 import org.apache.beam.repackaged.core.org.apache.commons.lang3.RandomStringUtils;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.AvroCoder;
-import org.apache.beam.sdk.coders.DefaultCoder;
-import org.apache.beam.sdk.extensions.gcp.util.gcsfs.GcsPath;
+import org.apache.beam.sdk.coders.ListCoder;
+import org.apache.beam.sdk.coders.NullableCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
+import org.apache.beam.sdk.io.ReadableFileCoder;
 import org.apache.beam.sdk.io.WriteFilesResult;
+import org.apache.beam.sdk.io.fs.CreateOptions;
+import org.apache.beam.sdk.io.fs.MoveOptions;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
@@ -75,8 +80,8 @@ import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.Values;
+import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
@@ -91,7 +96,12 @@ import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.io.DelegatingSeekableInputStream;
+import org.apache.parquet.io.InputFile;
+import org.apache.parquet.io.SeekableInputStream;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -104,11 +114,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * This pipeline ingests incoming JSON data from a Cloud Pub/Sub topic and outputs the data into windowed Parquet files in the specified
- * output directory.
+ * This pipeline ingests incoming data from a Cloud Pub/Sub topic and outputs the raw data into windowed Avro files at the specified output
+ * directory.
  *
  * <p>
- * Files output will have the following AVRO schema:
+ * Files output will have the following schema:
  *
  * <pre>
  *   {
@@ -202,7 +212,7 @@ public class PubsubToGCSParquet {
           + "         {\"name\": \"about5\", \"type\": \"string\"}\n"
           + "       ]\n"
           + "    }";
-  private static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
+  static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
 
   /**
    * Options supported by the pipeline.
@@ -210,7 +220,7 @@ public class PubsubToGCSParquet {
    * <p>
    * Inherits standard configuration options.
    */
-  public interface PStoGCSParquetOptions extends PipelineOptions, DataflowPipelineOptions {
+  public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
 
     @Description("The Cloud Pub/Sub subscription to read from.")
     @Validation.Required
@@ -225,6 +235,7 @@ public class PubsubToGCSParquet {
     void setOutputDirectory(ValueProvider<String> value);
 
     @Description("The directory to output temp files to, used when composing files. Must end with a slash.")
+    @Default.String("NA")
     ValueProvider<String> getComposeTempDirectory();
 
     void setComposeTempDirectory(ValueProvider<String> value);
@@ -270,13 +281,19 @@ public class PubsubToGCSParquet {
 
     void setCreateSuccessFile(Boolean value);
 
-    @Description("Composes multiple small files into bigger ones (Only GCS destination)")
+    @Description("Enables composition of multiple small files into bigger ones (Parquet support included in this pipeline)")
     @Default.Boolean(false)
     Boolean getComposeSmallFiles();
 
     void setComposeSmallFiles(Boolean value);
 
-    @Description("Cleans all files part after composing them (Only GCS destination)")
+    @Description("")
+    @Default.Integer(10)
+    Integer getFileCountPerCompose();
+
+    void setFileCountPerCompose(Integer value);
+
+    @Description("Cleans all files part after composing them (Parquet support included in this pipeline)")
     @Default.Boolean(true)
     Boolean getCleanComposePartFiles();
 
@@ -342,14 +359,17 @@ public class PubsubToGCSParquet {
                                     TupleTagList.of(dataOnWindowSignals)))
             .apply("WriteParquetToGCS",
                     WriteFormatToGCS.<GenericRecord>create()
-                            .withSink(ParquetIO
-                                    .sink(AVRO_SCHEMA)
-                                    .withCompressionCodec(CompressionCodecName.SNAPPY))
-                            .withComposeSmallFiles(options.getComposeSmallFiles())
-                            .withCleanComposePartFiles(options.getCleanComposePartFiles())
+                            .withSinkProvider(
+                                    () -> ParquetIO
+                                            .sink(AVRO_SCHEMA)
+                                            .withCompressionCodec(CompressionCodecName.SNAPPY))
                             .withDataToIngestTag(dataToIngest)
                             .withDataOnWindowSignalsTag(dataOnWindowSignals)
                             .withComposeTempDirectory(options.getComposeTempDirectory())
+                            .withComposeSmallFiles(options.getComposeSmallFiles())
+                            .withCleanComposePartFiles(options.getCleanComposePartFiles())
+                            .withFileCountPerCompose(options.getFileCountPerCompose())
+                            .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
                             .withNumShards(options.getNumShards())
                             .withOutputDirectory(options.getOutputDirectory())
                             .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
@@ -415,100 +435,222 @@ public class PubsubToGCSParquet {
     }
   }
 
+  @FunctionalInterface
+  public interface SerializableProvider<OutputT>
+          extends Serializable {
+
+    /**
+     * Returns the result of invoking this function on the given input.
+     *
+     * @return
+     */
+    OutputT apply();
+  }
+
+  /**
+   * Intended to model the function the Compose transform will use to read compose part files and write them into the compose.
+   *
+   * @param <SinkT>
+   */
+  @FunctionalInterface
+  public interface ComposeFunction<SinkT extends FileIO.Sink> extends Serializable {
+
+    /**
+     * Returns the result of invoking this function given the output.
+     *
+     * @param sink A Beam sink implementation for the determined type
+     * @param composeDestination the location for the compose file
+     * @param composePartLocations an iterable with the location of all the compose part files
+     * @return True in case the compose file was successfully written, false otherwise.
+     */
+    Boolean apply(SinkT sink, String composeDestination, Iterable<FileIO.ReadableFile> composePartLocations);
+  }
+
+  /**
+   * Beam related implementation of Parquet InputFile (copied from Beam SDK).
+   */
+  static class BeamParquetInputFile implements InputFile {
+
+    private final SeekableByteChannel seekableByteChannel;
+
+    BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
+      this.seekableByteChannel = seekableByteChannel;
+    }
+
+    @Override
+    public long getLength() throws IOException {
+      return seekableByteChannel.size();
+    }
+
+    @Override
+    public SeekableInputStream newStream() {
+      return new DelegatingSeekableInputStream(Channels.newInputStream(seekableByteChannel)) {
+
+        @Override
+        public long getPos() throws IOException {
+          return seekableByteChannel.position();
+        }
+
+        @Override
+        public void seek(long newPos) throws IOException {
+          seekableByteChannel.position(newPos);
+        }
+      };
+    }
+  }
+
+  /**
+   * Given a list of original compose part files, a destination for the compose file destination, and a ParquetIO.Sink instance it will read
+   * the source files and write content to the destination.
+   *
+   * @param sink A ParquetIO.Sink initialized instance.
+   * @param destinationPath the destination of the compose file
+   * @param composeParts the original compose part files
+   * @return True in case the compose file was successfully written, false otherwise.
+   */
+  public static Boolean composeParquetFiles(
+          FileIO.Sink<GenericRecord> sink,
+          String destinationPath,
+          Iterable<FileIO.ReadableFile> composeParts) {
+
+    LOG.debug("Writing into file {}", destinationPath);
+
+    try ( WritableByteChannel writeChannel
+            = FileSystems.create(
+                    FileSystems.matchNewResource(destinationPath, false),
+                    CreateOptions.StandardCreateOptions.builder().setMimeType("").build())) {
+      sink.open(writeChannel);
+
+      for (FileIO.ReadableFile readablePart : composeParts) {
+        LOG.debug("Composing data from {}", readablePart.getMetadata().resourceId());
+        AvroParquetReader.Builder<GenericRecord> readerBuilder
+                = AvroParquetReader.<GenericRecord>builder(
+                        new BeamParquetInputFile(readablePart.openSeekable()));
+        try ( ParquetReader<GenericRecord> reader = readerBuilder.build()) {
+          GenericRecord read;
+          while ((read = reader.read()) != null) {
+            sink.write(read);
+          }
+        } catch (Exception ex) {
+          LOG.error("Error while composing files.", ex);
+          LOG.warn("Tried to compose using file {} but failed, skipping.", readablePart.getMetadata().resourceId().getFilename());
+        }
+      }
+      sink.flush();
+      return true;
+    } catch (Exception ex) {
+      LOG.error("Error while composing files.", ex);
+      LOG.warn("Tried to compose into file {} but failed, skipping.", destinationPath);
+      return false;
+    }
+  }
+
   /**
    * Writes files in GCS using a defined format, can be configured to compose small files and create success files on windows (with or
    * without data being present).
    */
-  static class WriteFormatToGCS<T> extends PTransform<PCollectionTuple, PDone> {
+  static class WriteFormatToGCS<DataT> extends PTransform<PCollectionTuple, PDone> {
 
     private TupleTag<Boolean> dataOnWindowSignals;
-    private TupleTag<T> dataToIngest;
-    private FileIO.Sink<T> sink;
+    private TupleTag<DataT> dataToIngest;
     private ValueProvider<String> outputFilenamePrefix;
     private ValueProvider<String> outputFilenameSuffix;
     private ValueProvider<String> tempDirectory;
     private String windowDuration;
     private Integer numShards = 400;
-    private Boolean composeSmallFiles = true;
+    private Integer fileCountPerCompose = 10;
+    private Boolean composeSmallFiles = false;
     private ValueProvider<String> composeTempDirectory;
     private ValueProvider<String> outputDirectory;
     private Boolean cleanComposePartFiles = true;
     private Boolean createSuccessFile = true;
+    private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
+    private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
     private WriteFormatToGCS() {
     }
 
-    public WriteFormatToGCS<T> withOutputFilenamePrefix(ValueProvider<String> outputFilenamePrefix) {
+    public WriteFormatToGCS<DataT> withOutputFilenamePrefix(ValueProvider<String> outputFilenamePrefix) {
       this.outputFilenamePrefix = outputFilenamePrefix;
       return this;
     }
 
-    public WriteFormatToGCS<T> withOutputFilenameSuffix(ValueProvider<String> outputFilenameSuffix) {
+    public WriteFormatToGCS<DataT> withOutputFilenameSuffix(ValueProvider<String> outputFilenameSuffix) {
       this.outputFilenameSuffix = outputFilenameSuffix;
       return this;
     }
 
-    public WriteFormatToGCS<T> withTempDirectory(ValueProvider<String> tempDirectory) {
+    public WriteFormatToGCS<DataT> withTempDirectory(ValueProvider<String> tempDirectory) {
       this.tempDirectory = tempDirectory;
       return this;
     }
 
-    public WriteFormatToGCS<T> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
+    public WriteFormatToGCS<DataT> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
       this.composeTempDirectory = composeTempDirectory;
       return this;
     }
 
-    public WriteFormatToGCS<T> withOutputDirectory(ValueProvider<String> outputDirectory) {
+    public WriteFormatToGCS<DataT> withOutputDirectory(ValueProvider<String> outputDirectory) {
       this.outputDirectory = outputDirectory;
       return this;
     }
 
-    public WriteFormatToGCS<T> withWindowDuration(String windowDuration) {
+    public WriteFormatToGCS<DataT> withWindowDuration(String windowDuration) {
       this.windowDuration = windowDuration;
       return this;
     }
 
-    public WriteFormatToGCS<T> withNumShards(Integer numShards) {
+    public WriteFormatToGCS<DataT> withNumShards(Integer numShards) {
       this.numShards = numShards;
       return this;
     }
 
-    public WriteFormatToGCS<T> withComposeSmallFiles(Boolean composeSmallFiles) {
+    public WriteFormatToGCS<DataT> withFileCountPerCompose(Integer fileCountPerCompose) {
+      this.fileCountPerCompose = fileCountPerCompose;
+      return this;
+    }
+
+    public WriteFormatToGCS<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
       this.composeSmallFiles = composeSmallFiles;
       return this;
     }
 
-    public WriteFormatToGCS<T> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
+    public WriteFormatToGCS<DataT> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
       this.cleanComposePartFiles = cleanComposePartFiles;
       return this;
     }
 
-    public WriteFormatToGCS<T> withCreateSuccessFile(Boolean createSuccessFile) {
+    public WriteFormatToGCS<DataT> withCreateSuccessFile(Boolean createSuccessFile) {
       this.createSuccessFile = createSuccessFile;
       return this;
     }
 
-    public WriteFormatToGCS<T> withSink(FileIO.Sink<T> sink) {
-      this.sink = sink;
-      return this;
-    }
-
-    public WriteFormatToGCS<T> withDataToIngestTag(TupleTag<T> dataToIngest) {
+    public WriteFormatToGCS<DataT> withDataToIngestTag(TupleTag<DataT> dataToIngest) {
       this.dataToIngest = dataToIngest;
       return this;
     }
 
-    public WriteFormatToGCS<T> withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
+    public WriteFormatToGCS<DataT> withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
       this.dataOnWindowSignals = dataOnWindowSignals;
       return this;
     }
 
-    public static <T> WriteFormatToGCS<T> create() {
+    public WriteFormatToGCS<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
+      this.sinkProvider = sinkProvider;
+      return this;
+    }
+
+    public WriteFormatToGCS<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+      this.composeFunction = composeFunction;
+      return this;
+    }
+
+    public static <DataT> WriteFormatToGCS<DataT> create() {
       return new WriteFormatToGCS<>();
     }
 
-    public static <T> TupleTag<T> dataToIngestTag() {
-      return new TupleTag<T>() {
+    public static <DataT> TupleTag<DataT> dataToIngestTag() {
+      return new TupleTag<DataT>() {
       };
     }
 
@@ -520,22 +662,16 @@ public class PubsubToGCSParquet {
     @Override
     public void validate(PipelineOptions options) {
       super.validate(options);
-      PStoGCSParquetOptions pstogcsOptions = (PStoGCSParquetOptions) options;
-      // this Transform only supports GCS output paths for now.
-      GcsPath.fromUri(pstogcsOptions.getOutputDirectory().get());
 
       checkArgument(outputFilenamePrefix != null, "A file prefix should be provided using with method");
       checkArgument(outputFilenameSuffix != null, "A file suffix should be provided using with method");
       checkArgument(tempDirectory != null, "A temporary directory should be provided using with method");
       checkArgument(windowDuration != null, "A window duration should be provided using withWindowDuration method");
       checkArgument(outputDirectory != null, "An output directory should be provided using with method");
-      checkArgument(sink != null, "A fully configured Sink should be provided using withSink method.");
+      checkArgument(sinkProvider != null,
+              "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
       checkArgument(dataOnWindowSignals != null && dataToIngest != null,
               "Proper TupleTags must be configured for this transform unsing with*Tag method.");
-      if (composeSmallFiles) {
-        checkArgument(composeTempDirectory.get() != null,
-                "When composing files a temp location should be configured in option --composeTempDirectory");
-      }
     }
 
     @Override
@@ -543,6 +679,11 @@ public class PubsubToGCSParquet {
       // check if the expected tags are included in the PCollectionTuple
       if (!input.has(dataOnWindowSignals) || !input.has(dataToIngest)) {
         throw new IllegalArgumentException("Writes to GCS expects 2 tuple tags on PCollection (data to ingest and signals on windows).");
+      }
+
+      if (composeSmallFiles && composeTempDirectory.isAccessible()) {
+        checkArgument(composeTempDirectory.get() != null,
+                "When composing files a temp location should be configured in option --composeTempDirectory");
       }
 
       // create the naming strategy for created files
@@ -555,8 +696,8 @@ public class PubsubToGCSParquet {
       WriteFilesResult<Void> writtenFiles = input
               .get(dataToIngest)
               .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
-                      FileIO.<T>write()
-                              .via(sink)
+                      FileIO.<DataT>write()
+                              .via(sinkProvider.apply())
                               .withTempDirectory(tempDirectory)
                               // we will use the same naming for all writes (final or temps) to ease debugging (when needed)
                               .withNaming(naming)
@@ -570,24 +711,26 @@ public class PubsubToGCSParquet {
 
       if (composeSmallFiles) {
         // we create a compose files transform
-        ComposeGCSFiles<Void> composeTransform
+        ComposeGCSFiles<Void, DataT> composeTransform
                 = ComposeGCSFiles
-                        .<Void>create(
-                                outputDirectory,
-                                outputFilenamePrefix,
-                                outputFilenameSuffix,
-                                numShards)
-                        .withFileNaming(naming);
+                        .<Void, DataT>create()
+                        .withFileNaming(naming)
+                        .withFilePrefix(outputFilenamePrefix)
+                        .withFileSuffix(outputFilenameSuffix)
+                        .withOriginalNumShards(numShards)
+                        .withOutputPath(outputDirectory)
+                        .withFileCountPerCompose(fileCountPerCompose)
+                        .withSinkProvider(sinkProvider)
+                        .withComposeFunction(composeFunction);
 
         // check if we don't need to clean composing parts
         if (!cleanComposePartFiles) {
           composeTransform.withoutCleaningParts();
         }
 
-        // remove void keys and apply compose files
         fileNames = writtenFiles
                 .getPerDestinationOutputFilenames()
-                //.apply("RemoveVoidKeys", Values.create())
+                .apply("RemoveDestinationKeys", Values.create())
                 .apply("ComposeSmallFiles", composeTransform);
       }
 
@@ -702,7 +845,7 @@ public class PubsubToGCSParquet {
                 .collect(Collectors.toList());
 
         if (files.size() > 0) {
-          createSuccessFileInFilesDir(files.get(0));
+          createSuccessFileInPath(files.get(0), false);
           context.output((Void) null);
         }
       }
@@ -712,85 +855,140 @@ public class PubsubToGCSParquet {
   /**
    * Composes a list of GCS objects (files) into bigger ones. By default all the part files are deleted, this can be disabled.
    */
-  static class ComposeGCSFiles<K> extends PTransform<PCollection<KV<K, String>>, PCollection<String>> {
+  static class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
 
-    // max supported by compose method in GCS
-    private static final Integer MAX_FILES_IN_COMPOSE_BUNDLE = 32;
-
-    private final ValueProvider<String> outputPath;
-    private final Integer numShards;
+    private Integer fileCountPerCompose = 100;
+    private ValueProvider<String> outputPath;
+    private ValueProvider<String> filePrefix;
+    private ValueProvider<String> fileSuffix;
+    private Integer numShards;
     private Boolean cleanParts = true;
     private WindowedFileNaming naming;
+    private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
+    private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
-    private ComposeGCSFiles(
-            ValueProvider<String> outputPath,
-            ValueProvider<String> filePrefix,
-            ValueProvider<String> fileSuffix,
-            Integer numShards) {
-      this.outputPath = outputPath;
-      this.naming = new WindowedFileNaming(filePrefix, fileSuffix, RandomStringUtils.random(5));
-      this.numShards = numShards;
+    private ComposeGCSFiles() {
     }
 
-    static public <K> ComposeGCSFiles<K> create(
-            ValueProvider<String> outputPath,
-            ValueProvider<String> filePrefix,
-            ValueProvider<String> fileSuffix,
-            Integer numShards) {
-      return new ComposeGCSFiles<>(outputPath, filePrefix, fileSuffix, numShards);
+    static public <KeyT, SinkType> ComposeGCSFiles<KeyT, SinkType> create() {
+      return new ComposeGCSFiles<>();
     }
 
-    public ComposeGCSFiles<K> withoutCleaningParts() {
+    public ComposeGCSFiles<KeyT, DataT> withoutCleaningParts() {
       this.cleanParts = false;
       return this;
     }
 
-    public ComposeGCSFiles<K> withFileNaming(WindowedFileNaming naming) {
+    public ComposeGCSFiles<KeyT, DataT> withFileNaming(WindowedFileNaming naming) {
       this.naming = naming;
       return this;
     }
 
+    public ComposeGCSFiles<KeyT, DataT> withOutputPath(ValueProvider<String> outputPath) {
+      this.outputPath = outputPath;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withFilePrefix(ValueProvider<String> filePrefix) {
+      this.filePrefix = filePrefix;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withFileSuffix(ValueProvider<String> fileSuffix) {
+      this.fileSuffix = fileSuffix;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withOriginalNumShards(Integer numShards) {
+      this.numShards = numShards;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withFileCountPerCompose(Integer fileCount) {
+      this.fileCountPerCompose = fileCount;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
+      this.sinkProvider = sinkProvider;
+      return this;
+    }
+
+    public ComposeGCSFiles<KeyT, DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+      this.composeFunction = composeFunction;
+      return this;
+    }
+
     @Override
-    public PCollection<String> expand(PCollection<KV<K, String>> input) {
+    public void validate(PipelineOptions options) {
+      super.validate(options);
+
+      checkArgument(sinkProvider != null,
+              "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
+      checkArgument(composeFunction != null, "A compose function implementation should be provided.");
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public PCollection<String> expand(PCollection<String> input) {
+      // registering coder for context object
+      input.getPipeline().getCoderRegistry().registerCoderForClass(ComposeContext.class, ComposeContextCoder.of());
+      // create naming strategy if not provided before
+      if (this.naming == null) {
+        this.naming = new WindowedFileNaming(filePrefix, fileSuffix, RandomStringUtils.random(5));
+      }
+
       return input
-              .apply("GroupIntoBatches", GroupIntoBatches.ofSize(MAX_FILES_IN_COMPOSE_BUNDLE))
+              // first match all the files to be processed
+              .apply("MatchFiles", FileIO.matchAll())
+              // capture readable matches
+              .apply("ToReadable", FileIO.readMatches())
+              // group into batches
+              .apply(WithKeys.of((Void) null))
+              .apply("GroupIntoBatches", GroupIntoBatches.ofSize(
+                      numShards <= fileCountPerCompose ? numShards : fileCountPerCompose))
               // create the file bundles that will compone the composed files
-              .apply("CreateComposeBundles", ParDo.of(new CreateComposeBundles<>(naming, numShards)))
+              .apply("CreateComposeBundles", ParDo.of(
+                      new CreateComposeBundles<>(naming, numShards, fileCountPerCompose)))
               // materialize this results, making bundles stable
-              .apply("ReshuffleBundles", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleBundles",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // create the composed temp files
-              .apply("ComposeTemporaryFiles", ParDo.of(new ComposeFiles()))
+              .apply("ComposeTemporaryFiles",
+                      ParDo.of(new ComposeFiles<DataT>()
+                              .withSinkProvider(sinkProvider)
+                              .withComposeFunction(composeFunction)))
               // materialize the temp files, will reuse same temp files in retries later on 
-              .apply("ReshuffleTemps", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleTemps",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // move the composed files to their destination
               .apply("CopyToDestination", ParDo.of(new CopyToDestination(outputPath, naming)))
               // materialize destination files
-              .apply("ReshuffleDests", Reshuffle.<ComposeContext>viaRandomKey())
+              .apply("ReshuffleDests",
+                      org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
               // clean all the previous parts if configured to 
               .apply("Cleanup", ParDo.of(new CleanupFiles(cleanParts)))
               // materialize compose file results
-              .apply("ReshuffleResults", Reshuffle.<String>viaRandomKey());
+              .apply("ReshuffleResults",
+                      org.apache.beam.sdk.transforms.Reshuffle.<String>viaRandomKey());
     }
 
     /**
      * Captures the information of a yet to be composed file
      */
-    @DefaultCoder(AvroCoder.class)
-    static class ComposeContext {
+    static class ComposeContext implements Serializable {
 
       public Integer shard;
       public Integer totalShards;
-      public @Nullable
-      String composedFile;
-      public @Nullable
-      String composedTempFile;
-      public List<String> partFiles = new ArrayList<>();
+      public String composedFile;
+      public String composedTempFile;
+      public List<FileIO.ReadableFile> partFiles = new ArrayList<>();
 
       public ComposeContext() {
       }
 
       public ComposeContext(Integer shard, Integer totalShards, String composedFile,
-              String composedTempFile, List<String> partFiles) {
+              String composedTempFile, List<FileIO.ReadableFile> partFiles) {
         this.shard = shard;
         this.totalShards = totalShards;
         this.composedFile = composedFile;
@@ -799,7 +997,7 @@ public class PubsubToGCSParquet {
       }
 
       public static ComposeContext of(Integer shard, Integer totalShards, String composedFile,
-              String composedTempFile, List<String> partFiles) {
+              String composedTempFile, List<FileIO.ReadableFile> partFiles) {
         return new ComposeContext(shard, totalShards, composedFile, composedTempFile, partFiles);
       }
 
@@ -822,10 +1020,7 @@ public class PubsubToGCSParquet {
           return false;
         }
         final ComposeContext other = (ComposeContext) obj;
-        if (!Objects.equals(this.partFiles, other.partFiles)) {
-          return false;
-        }
-        return true;
+        return Objects.equals(this.partFiles, other.partFiles);
       }
 
       @Override
@@ -834,7 +1029,37 @@ public class PubsubToGCSParquet {
                 + ", composedFile=" + composedFile + ", composedTempFile=" + composedTempFile
                 + ", partFiles=" + partFiles + '}';
       }
+    }
 
+    static class ComposeContextCoder extends AtomicCoder<ComposeContext> {
+
+      private static final ComposeContextCoder INSTANCE = new ComposeContextCoder();
+
+      /**
+       * Returns the instance of {@link ReadableFileCoder}.
+       */
+      public static ComposeContextCoder of() {
+        return INSTANCE;
+      }
+
+      @Override
+      public void encode(ComposeContext value, OutputStream os) throws IOException {
+        VarIntCoder.of().encode(value.shard, os);
+        VarIntCoder.of().encode(value.totalShards, os);
+        NullableCoder.of(StringUtf8Coder.of()).encode(value.composedFile, os);
+        NullableCoder.of(StringUtf8Coder.of()).encode(value.composedTempFile, os);
+        ListCoder.of(ReadableFileCoder.of()).encode(value.partFiles, os);
+      }
+
+      @Override
+      public ComposeContext decode(InputStream is) throws IOException {
+        Integer shards = VarIntCoder.of().decode(is);
+        Integer totalShards = VarIntCoder.of().decode(is);
+        String composedFile = NullableCoder.of(StringUtf8Coder.of()).decode(is);
+        String composedTempFile = NullableCoder.of(StringUtf8Coder.of()).decode(is);
+        List<FileIO.ReadableFile> parts = ListCoder.of(ReadableFileCoder.of()).decode(is);
+        return ComposeContext.of(shards, totalShards, composedFile, composedTempFile, parts);
+      }
     }
 
     /**
@@ -844,43 +1069,46 @@ public class PubsubToGCSParquet {
 
       private static final Logger LOG = LoggerFactory.getLogger(CleanupFiles.class);
 
-      private Storage storage;
       private final Boolean cleanParts;
 
       public CleanupFiles(Boolean cleanParts) {
         this.cleanParts = cleanParts;
       }
 
-      @StartBundle
-      public void start(PipelineOptions options) {
-        storage = StorageOptions.getDefaultInstance().getService();
-      }
-
       @ProcessElement
-      public void processElement(ProcessContext context) {
+      public void processElement(ProcessContext context) throws IOException {
         if (cleanParts) {
           LOG.debug("Will delete files: {}", context.element().partFiles);
           Long startTime = System.currentTimeMillis();
-          storage.delete(
+          FileSystems.delete(
                   // grabs the part file paths
                   context.element().partFiles
                           .stream()
-                          // parse the GCS paths
-                          .map(f -> GcsPath.fromUri(f))
-                          // create blob ids
-                          .map(gcsPath -> BlobId.of(gcsPath.getBucket(), gcsPath.getObject()))
+                          // capture resources ids
+                          .map(f -> f.getMetadata().resourceId())
                           // collects them for deletion
-                          .collect(Collectors.toList()));
+                          .collect(Collectors.toList()),
+                  MoveOptions.StandardMoveOptions.IGNORE_MISSING_FILES);
+
           LOG.debug("{} part files deleted in {}ms.", context.element().partFiles.size(), System.currentTimeMillis() - startTime);
 
           Long tmpFileStartTime = System.currentTimeMillis();
           Optional
                   .ofNullable(context.element().composedTempFile)
-                  .map(tmpFile -> GcsPath.fromUri(tmpFile))
-                  .map(gcsPath -> BlobId.of(gcsPath.getBucket(), gcsPath.getObject()))
+                  .map(tmpFile -> {
+                    try {
+                      return FileSystems.matchSingleFileSpec(tmpFile).resourceId();
+                    } catch (IOException ex) {
+                      return null;
+                    }
+                  })
                   .ifPresent(tmpBlob -> {
-                    storage.delete(tmpBlob);
-                    LOG.debug("File {} deleted in {}ms.", tmpBlob.toString(), System.currentTimeMillis() - tmpFileStartTime);
+                    try {
+                      FileSystems.delete(Arrays.asList(tmpBlob));
+                      LOG.debug("File {} deleted in {}ms.", tmpBlob.toString(), System.currentTimeMillis() - tmpFileStartTime);
+                    } catch (IOException ex) {
+                      LOG.error("File {} was not deleted.", ex);
+                    }
                   });
         }
 
@@ -897,16 +1125,10 @@ public class PubsubToGCSParquet {
 
       private final ValueProvider<String> outputPath;
       private final WindowedFileNaming naming;
-      private Storage storage;
 
       public CopyToDestination(ValueProvider<String> outputPath, WindowedFileNaming naming) {
         this.outputPath = outputPath;
         this.naming = naming;
-      }
-
-      @StartBundle
-      public void start(PipelineOptions options) {
-        storage = StorageOptions.getDefaultInstance().getService();
       }
 
       @ProcessElement
@@ -924,27 +1146,19 @@ public class PubsubToGCSParquet {
                         context.element().shard,
                         Compression.UNCOMPRESSED);
 
-        Blob sourceBlob = Optional.ofNullable(composeCtx.composedTempFile)
-                .map(tempSourceFile -> GcsPath.fromUri(tempSourceFile))
-                .map(sourcePath -> BlobId.of(sourcePath.getBucket(), sourcePath.getObject()))
-                .map(tempBlob -> storage.get(tempBlob))
+        ResourceId tempResource = Optional.ofNullable(composeCtx.composedTempFile)
+                .map(tmpFile -> {
+                  try {
+                    return FileSystems.matchSingleFileSpec(tmpFile).resourceId();
+                  } catch (IOException ex) {
+                    return null;
+                  }
+                })
                 .orElse(null);
 
-        if (sourceBlob != null) {
-          GcsPath destinationPath = GcsPath.fromUri(fileDestination);
-
-          Storage.CopyRequest copyReq = Storage.CopyRequest.of(
-                  sourceBlob.getBlobId(),
-                  BlobId.of(destinationPath.getBucket(), destinationPath.getObject()));
-
-          Blob destinationObj = storage.copy(copyReq).getResult();
-          LOG.debug("Composed temp file {} copied to {}, composed files {}",
-                  composeCtx.composedTempFile,
-                  destinationObj.getSelfLink(),
-                  composeCtx.partFiles);
-
+        if (tempResource != null) {
+          FileSystems.copy(Arrays.asList(tempResource), Arrays.asList(FileSystems.matchNewResource(fileDestination, false)));
           LOG.debug("Copied temp file in {}ms", System.currentTimeMillis() - startTime);
-
           context.output(
                   ComposeContext.of(composeCtx.shard,
                           composeCtx.totalShards,
@@ -967,33 +1181,29 @@ public class PubsubToGCSParquet {
      * Given a KV of destinations and strings iterable, it will create the bundles that will be composed, the compose files won't have more
      * than 32 parts (current GCS operation limit).
      */
-    static class CreateComposeBundles<K> extends DoFn<KV<K, Iterable<String>>, ComposeContext> {
+    static class CreateComposeBundles<KeyT> extends DoFn<KV<KeyT, Iterable<FileIO.ReadableFile>>, ComposeContext> {
 
       private static final Logger LOG = LoggerFactory.getLogger(CreateComposeBundles.class);
 
       private final WindowedFileNaming naming;
       private final Integer totalBundles;
-      private Storage storage;
-      private String bucketName;
       private String tempPathName;
 
       @StateId("currentNumShard")
       private final StateSpec<ValueState<Integer>> currentNumShard = StateSpecs.value();
 
-      public CreateComposeBundles(WindowedFileNaming naming, Integer numShards) {
+      public CreateComposeBundles(WindowedFileNaming naming, Integer originalNumShards, Integer filesPerCompose) {
         this.naming = naming;
-        this.totalBundles = numShards % MAX_FILES_IN_COMPOSE_BUNDLE == 0
-                ? numShards / MAX_FILES_IN_COMPOSE_BUNDLE
-                : (numShards / MAX_FILES_IN_COMPOSE_BUNDLE) + 1;
+        this.totalBundles = originalNumShards % filesPerCompose == 0
+                ? originalNumShards / filesPerCompose
+                : (originalNumShards / filesPerCompose) + 1;
       }
 
       @StartBundle
       public void start(PipelineOptions options) {
-        storage = StorageOptions.getDefaultInstance().getService();
-        GcsPath gcsPath = GcsPath.fromUri(options.getTempLocation());
-        bucketName = gcsPath.getBucket();
-        tempPathName = gcsPath.getObject().endsWith("/") ? gcsPath.getObject() : gcsPath.getObject()
-                + "/" + options.getJobName() + "/";
+        tempPathName
+                = (options.getTempLocation().endsWith("/") ? options.getTempLocation() : options.getTempLocation() + "/")
+                + options.getJobName() + "/";
       }
 
       @ProcessElement
@@ -1007,9 +1217,8 @@ public class PubsubToGCSParquet {
 
         String tempFilePartialFileName
                 = tempPathName + naming.getFilename(window, pane, totalBundles, currentShard, Compression.UNCOMPRESSED);
-        createIfNotExistsTempComposeTarget(storage, bucketName, tempFilePartialFileName, currentShard);
 
-        List<String> composeParts = StreamSupport
+        List<FileIO.ReadableFile> composeParts = StreamSupport
                 .stream(context.element().getValue().spliterator(), false)
                 .collect(Collectors.toList());
 
@@ -1026,96 +1235,53 @@ public class PubsubToGCSParquet {
         // Update the state.
         state.write(currentShard + 1);
       }
-
-      static void createIfNotExistsTempComposeTarget(Storage storage, String bucketName, String destinationPath, Integer shard) {
-        try {
-          BlobId blobId = BlobId.of(bucketName, destinationPath);
-
-          if (storage.get(blobId) == null) {
-            storage.create(BlobInfo
-                    .newBuilder(blobId)
-                    .build());
-            LOG.debug("Created temp file for composition {}", blobId);
-          }
-        } catch (StorageException e) {
-          LOG.error("Error while trying to create temp compose file " + destinationPath, e);
-          throw e;
-        }
-      }
     }
 
     /**
      * Given a compose context object will grab all the part files, extract the object names and create a compose object in a temporary
      * location.
      */
-    static class ComposeFiles extends DoFn<ComposeContext, ComposeContext> {
+    static class ComposeFiles<K> extends DoFn<ComposeContext, ComposeContext> {
 
       private static final Logger LOG = LoggerFactory.getLogger(ComposeFiles.class);
-      private Storage storage;
-      private String bucketName;
+      private SerializableProvider<FileIO.Sink<K>> sinkProvider;
+      private ComposeFunction<FileIO.Sink<K>> composeFunction;
 
-      @StartBundle
-      public void start(PipelineOptions options) {
-        storage = StorageOptions.getDefaultInstance().getService();
-        GcsPath gcsPath = GcsPath.fromUri(options.getTempLocation());
-        bucketName = gcsPath.getBucket();
+      public ComposeFiles<K> withSinkProvider(SerializableProvider<FileIO.Sink<K>> sinkProvider) {
+        this.sinkProvider = sinkProvider;
+        return this;
+      }
+
+      public ComposeFiles<K> withComposeFunction(ComposeFunction<FileIO.Sink<K>> composeFunction) {
+        this.composeFunction = composeFunction;
+        return this;
+      }
+
+      @Setup
+      public void setup() {
+        checkArgument(composeFunction != null, "A compose function should be provided.");
+        checkArgument(sinkProvider != null, "A sink provider should be provided.");
       }
 
       @ProcessElement
       public void processElement(ProcessContext context) throws IOException {
-        LOG.debug("Files to compose: {}", context.element());
+        ComposeContext composeCtx = context.element();
 
         Long startTime = System.currentTimeMillis();
-        // capture the object names only
-        List<String> files = context.element().partFiles
-                .stream()
-                .map(file -> GcsPath.fromUri(file).getObject())
-                .collect(Collectors.toList());
 
-        Blob composedObj = composeFiles(storage, bucketName, context.element().composedTempFile, files);
-        if (composedObj != null) {
-          LOG.debug("compose created in {}ms,  into gs://{}/{}",
-                  System.currentTimeMillis() - startTime, composedObj.getBucket(), composedObj.getName());
+        composeFunction.apply(
+                sinkProvider.apply(),
+                composeCtx.composedTempFile,
+                composeCtx.partFiles);
+        LOG.info("Composed temp file in {}ms", System.currentTimeMillis() - startTime);
 
-          context.output(
-                  ComposeContext.of(context.element().shard,
-                          context.element().totalShards,
-                          null,
-                          String.format("gs://%s/%s", composedObj.getBucket(), composedObj.getName()),
-                          context.element().partFiles));
-        } else {
-          context.output(
-                  ComposeContext.of(context.element().shard,
-                          context.element().totalShards,
-                          null,
-                          context.element().composedTempFile,
-                          context.element().partFiles));
-        }
-      }
-
-      static Blob composeFiles(Storage storage, String bucketName,
-              String destinationPath, Iterable<String> resourceList) {
-        try {
-          Blob destinationBlob = storage.get(BlobId.of(bucketName, destinationPath));
-          if (destinationBlob == null) {
-            // if late retrying (possible deletetion downstream)
-            LOG.warn("Temp composition not found gs://{}/{}, skipping.", bucketName, destinationPath);
-            return null;
-          }
-          LOG.debug("Retrieved temp file for composition {}", destinationBlob.getName());
-
-          Storage.ComposeRequest request
-                  = Storage.ComposeRequest.newBuilder()
-                          .setTarget(destinationBlob)
-                          .addSource(resourceList)
-                          .setTargetOptions(Storage.BlobTargetOption.detectContentType())
-                          .build();
-
-          return storage.compose(request);
-        } catch (StorageException e) {
-          LOG.error("Error while trying to bundle " + destinationPath + " process list " + resourceList, e);
-          throw e;
-        }
+        context.output(
+                ComposeContext.of(
+                        composeCtx.shard,
+                        composeCtx.totalShards,
+                        composeCtx.composedFile,
+                        composeCtx.composedTempFile,
+                        composeCtx.partFiles));
       }
     }
   }
@@ -1217,7 +1383,7 @@ public class PubsubToGCSParquet {
             outputPath = outputPath + buildPartitionedPathFromDatetime(Instant.now().toDateTime());
           }
           LOG.debug("Will create SUCCESS file at {}", outputPath);
-          createSuccessFileInFilesDir(outputPath);
+          createSuccessFileInPath(outputPath, true);
         }
       }
     }
@@ -1249,7 +1415,7 @@ public class PubsubToGCSParquet {
 
       StringBuilder fileNameSB = new StringBuilder(outputPath);
 
-      if (!filePrefix.get().isBlank()) {
+      if (!filePrefix.get().isEmpty()) {
         fileNameSB.append(filePrefix.get());
       }
 
@@ -1257,7 +1423,7 @@ public class PubsubToGCSParquet {
               .append("-shard-").append(shardIndex).append("-of-").append(numShards)
               .append("-exec-").append(exec);
 
-      if (!fileSuffix.get().isBlank()) {
+      if (!fileSuffix.get().isEmpty()) {
         fileNameSB.append(fileSuffix.get());
       }
 
@@ -1327,11 +1493,15 @@ public class PubsubToGCSParquet {
     return duration;
   }
 
-  private static void createSuccessFileInFilesDir(String file) {
-    ResourceId dirResourceFiles = FileSystems.matchNewResource(file, false).getCurrentDirectory();
+  private static void createSuccessFileInPath(String path, boolean isDirectory) {
+    // remove trailing / if exists since is not supported at the FileSystems level
+    path = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+
+    ResourceId dirResourceFiles = FileSystems.matchNewResource(path, isDirectory).getCurrentDirectory();
     ResourceId successFile = dirResourceFiles
             .resolve("SUCCESS", ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
 
+    LOG.debug("Will create success file in path {}.", successFile.toString());
     try ( WritableByteChannel writeChannel = FileSystems.create(successFile, MimeTypes.TEXT)) {
       writeChannel.write(ByteBuffer.wrap(" ".getBytes()));
     } catch (IOException ex) {
