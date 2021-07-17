@@ -116,7 +116,8 @@ public class PubsubToGCSParquetTest {
                     .withSinkProvider(
                             () -> ParquetIO
                                     .sink(SCHEMA)
-                                    .withCompressionCodec(CompressionCodecName.SNAPPY));
+                                    .withCompressionCodec(CompressionCodecName.SNAPPY))
+                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles);
 
     // register coder for the test pipeline
     testPipeline.getCoderRegistry().registerCoderForClass(

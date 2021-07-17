@@ -369,6 +369,7 @@ public class PubsubToGCSParquet {
                             .withComposeSmallFiles(options.getComposeSmallFiles())
                             .withCleanComposePartFiles(options.getCleanComposePartFiles())
                             .withFileCountPerCompose(options.getFileCountPerCompose())
+                            .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
                             .withNumShards(options.getNumShards())
                             .withOutputDirectory(options.getOutputDirectory())
                             .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
@@ -434,6 +435,116 @@ public class PubsubToGCSParquet {
     }
   }
 
+  @FunctionalInterface
+  public interface SerializableProvider<OutputT>
+          extends Serializable {
+
+    /**
+     * Returns the result of invoking this function on the given input.
+     *
+     * @return
+     */
+    OutputT apply();
+  }
+
+  /**
+   * Intended to model the function the Compose transform will use to read compose part files and write them into the compose.
+   *
+   * @param <SinkT>
+   */
+  @FunctionalInterface
+  public interface ComposeFunction<SinkT extends FileIO.Sink> extends Serializable {
+
+    /**
+     * Returns the result of invoking this function given the output.
+     *
+     * @param sink A Beam sink implementation for the determined type
+     * @param composeDestination the location for the compose file
+     * @param composePartLocations an iterable with the location of all the compose part files
+     * @return True in case the compose file was successfully written, false otherwise.
+     */
+    Boolean apply(SinkT sink, String composeDestination, Iterable<FileIO.ReadableFile> composePartLocations);
+  }
+
+  /**
+   * Beam related implementation of Parquet InputFile (copied from Beam SDK).
+   */
+  static class BeamParquetInputFile implements InputFile {
+
+    private final SeekableByteChannel seekableByteChannel;
+
+    BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
+      this.seekableByteChannel = seekableByteChannel;
+    }
+
+    @Override
+    public long getLength() throws IOException {
+      return seekableByteChannel.size();
+    }
+
+    @Override
+    public SeekableInputStream newStream() {
+      return new DelegatingSeekableInputStream(Channels.newInputStream(seekableByteChannel)) {
+
+        @Override
+        public long getPos() throws IOException {
+          return seekableByteChannel.position();
+        }
+
+        @Override
+        public void seek(long newPos) throws IOException {
+          seekableByteChannel.position(newPos);
+        }
+      };
+    }
+  }
+
+  /**
+   * Given a list of original compose part files, a destination for the compose file destination, and a ParquetIO.Sink instance it will read
+   * the source files and write content to the destination.
+   *
+   * @param sink A ParquetIO.Sink initialized instance.
+   * @param destinationPath the destination of the compose file
+   * @param composeParts the original compose part files
+   * @return True in case the compose file was successfully written, false otherwise.
+   */
+  public static Boolean composeParquetFiles(
+          FileIO.Sink<GenericRecord> sink,
+          String destinationPath,
+          Iterable<FileIO.ReadableFile> composeParts) {
+
+    LOG.debug("Writing into file {}", destinationPath);
+
+    try ( WritableByteChannel writeChannel
+            = FileSystems.create(
+                    FileSystems.matchNewResource(destinationPath, false),
+                    CreateOptions.StandardCreateOptions.builder().setMimeType("").build())) {
+      sink.open(writeChannel);
+
+      for (FileIO.ReadableFile readablePart : composeParts) {
+        LOG.debug("Composing data from {}", readablePart.getMetadata().resourceId());
+        AvroParquetReader.Builder<GenericRecord> readerBuilder
+                = AvroParquetReader.<GenericRecord>builder(
+                        new BeamParquetInputFile(readablePart.openSeekable()));
+        try ( ParquetReader<GenericRecord> reader = readerBuilder.build()) {
+          GenericRecord read;
+          while ((read = reader.read()) != null) {
+            sink.write(read);
+          }
+        } catch (Exception ex) {
+          LOG.error("Error while composing files.", ex);
+          LOG.warn("Tried to compose using file {} but failed, skipping.", readablePart.getMetadata().resourceId().getFilename());
+        }
+      }
+      sink.flush();
+      return true;
+    } catch (Exception ex) {
+      LOG.error("Error while composing files.", ex);
+      LOG.warn("Tried to compose into file {} but failed, skipping.", destinationPath);
+      return false;
+    }
+  }
+
   /**
    * Writes files in GCS using a defined format, can be configured to compose small files and create success files on windows (with or
    * without data being present).
@@ -454,6 +565,7 @@ public class PubsubToGCSParquet {
     private Boolean cleanComposePartFiles = true;
     private Boolean createSuccessFile = true;
     private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
+    private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
     private WriteFormatToGCS() {
     }
@@ -525,6 +637,11 @@ public class PubsubToGCSParquet {
 
     public WriteFormatToGCS<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
       this.sinkProvider = sinkProvider;
+      return this;
+    }
+
+    public WriteFormatToGCS<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+      this.composeFunction = composeFunction;
       return this;
     }
 
@@ -603,7 +720,8 @@ public class PubsubToGCSParquet {
                         .withOriginalNumShards(numShards)
                         .withOutputPath(outputDirectory)
                         .withFileCountPerCompose(fileCountPerCompose)
-                        .withSinkProvider(sinkProvider);
+                        .withSinkProvider(sinkProvider)
+                        .withComposeFunction(composeFunction);
 
         // check if we don't need to clean composing parts
         if (!cleanComposePartFiles) {
@@ -641,18 +759,6 @@ public class PubsubToGCSParquet {
 
       return PDone.in(input.getPipeline());
     }
-  }
-
-  @FunctionalInterface
-  public interface SerializableProvider<OutputT>
-          extends Serializable {
-
-    /**
-     * Returns the result of invoking this function on the given input.
-     *
-     * @return
-     */
-    OutputT apply();
   }
 
   /**
@@ -759,6 +865,7 @@ public class PubsubToGCSParquet {
     private Boolean cleanParts = true;
     private WindowedFileNaming naming;
     private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
+    private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
     private ComposeGCSFiles() {
     }
@@ -807,12 +914,18 @@ public class PubsubToGCSParquet {
       return this;
     }
 
+    public ComposeGCSFiles<KeyT, DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+      this.composeFunction = composeFunction;
+      return this;
+    }
+
     @Override
     public void validate(PipelineOptions options) {
       super.validate(options);
 
       checkArgument(sinkProvider != null,
               "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
+      checkArgument(composeFunction != null, "A compose function implementation should be provided.");
     }
 
     @SuppressWarnings("deprecation")
@@ -843,7 +956,8 @@ public class PubsubToGCSParquet {
               // create the composed temp files
               .apply("ComposeTemporaryFiles",
                       ParDo.of(new ComposeFiles<DataT>()
-                              .withSinkProvider(sinkProvider)))
+                              .withSinkProvider(sinkProvider)
+                              .withComposeFunction(composeFunction)))
               // materialize the temp files, will reuse same temp files in retries later on 
               .apply("ReshuffleTemps",
                       org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
@@ -1131,10 +1245,22 @@ public class PubsubToGCSParquet {
 
       private static final Logger LOG = LoggerFactory.getLogger(ComposeFiles.class);
       private SerializableProvider<FileIO.Sink<K>> sinkProvider;
+      private ComposeFunction<FileIO.Sink<K>> composeFunction;
 
       public ComposeFiles<K> withSinkProvider(SerializableProvider<FileIO.Sink<K>> sinkProvider) {
         this.sinkProvider = sinkProvider;
         return this;
+      }
+
+      public ComposeFiles<K> withComposeFunction(ComposeFunction<FileIO.Sink<K>> composeFunction) {
+        this.composeFunction = composeFunction;
+        return this;
+      }
+
+      @Setup
+      public void setup() {
+        checkArgument(composeFunction != null, "A compose function should be provided.");
+        checkArgument(sinkProvider != null, "A sink provider should be provided.");
       }
 
       @ProcessElement
@@ -1143,8 +1269,8 @@ public class PubsubToGCSParquet {
 
         Long startTime = System.currentTimeMillis();
 
-        composeParquetFiles(
-                (ParquetIO.Sink) sinkProvider.apply(),
+        composeFunction.apply(
+                sinkProvider.apply(),
                 composeCtx.composedTempFile,
                 composeCtx.partFiles);
         LOG.info("Composed temp file in {}ms", System.currentTimeMillis() - startTime);
@@ -1157,72 +1283,6 @@ public class PubsubToGCSParquet {
                         composeCtx.composedTempFile,
                         composeCtx.partFiles));
       }
-
-      private static class BeamParquetInputFile implements InputFile {
-
-        private final SeekableByteChannel seekableByteChannel;
-
-        BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
-          this.seekableByteChannel = seekableByteChannel;
-        }
-
-        @Override
-        public long getLength() throws IOException {
-          return seekableByteChannel.size();
-        }
-
-        @Override
-        public SeekableInputStream newStream() {
-          return new DelegatingSeekableInputStream(Channels.newInputStream(seekableByteChannel)) {
-
-            @Override
-            public long getPos() throws IOException {
-              return seekableByteChannel.position();
-            }
-
-            @Override
-            public void seek(long newPos) throws IOException {
-              seekableByteChannel.position(newPos);
-            }
-          };
-        }
-      }
-
-      static void composeParquetFiles(
-              ParquetIO.Sink sink,
-              String destinationPath,
-              Iterable<FileIO.ReadableFile> composeParts) {
-
-        LOG.debug("Writing into file {}", destinationPath);
-
-        try ( WritableByteChannel writeChannel
-                = FileSystems.create(
-                        FileSystems.matchNewResource(destinationPath, false),
-                        CreateOptions.StandardCreateOptions.builder().setMimeType("").build())) {
-          sink.open(writeChannel);
-
-          for (FileIO.ReadableFile readablePart : composeParts) {
-            LOG.debug("Composing data from {}", readablePart.getMetadata().resourceId());
-            AvroParquetReader.Builder<GenericRecord> readerBuilder
-                    = AvroParquetReader.<GenericRecord>builder(
-                            new BeamParquetInputFile(readablePart.openSeekable()));
-            try ( ParquetReader<GenericRecord> reader = readerBuilder.build()) {
-              GenericRecord read;
-              while ((read = reader.read()) != null) {
-                sink.write(read);
-              }
-            } catch (Exception ex) {
-              LOG.error("Error while composing files.", ex);
-              LOG.warn("Tried to compose using file {} but failed, skipping.", readablePart.getMetadata().resourceId().getFilename());
-            }
-          }
-          sink.flush();
-        } catch (Exception ex) {
-          LOG.error("Error while composing files.", ex);
-          LOG.warn("Tried to compose into file {} but failed, skipping.", destinationPath);
-        }
-      }
-
     }
   }
 
