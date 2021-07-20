@@ -15,7 +15,10 @@ import java.util.stream.StreamSupport;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
+import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.reflect.Nullable;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.DefaultCoder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -161,6 +164,14 @@ public class PubsubToGCSParquetTest {
     });
 
     testPipeline.run().waitUntilFinish();
+  }
+
+  @Test(expected = Exception.class)
+  public void testIncompleteData() throws Exception {
+    String jsonMessage = "{\"id\":\"0ef8e890-6bd9-460b-8103-8b2b013cf85a\"}";
+    DecoderFactory decoderFactory = new DecoderFactory();
+    Schema schema = new Schema.Parser().parse(PubsubToGCSParquet.JSON_AVRO_SCHEMA_STR);
+    GenericRecord gr = PubsubToGCSParquet.PubsubMessageToArchiveDoFn.parseGenericRecord(decoderFactory, schema, jsonMessage);
   }
 
 }

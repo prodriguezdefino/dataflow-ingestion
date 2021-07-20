@@ -182,33 +182,33 @@ public class PubsubToGCSParquet {
 
   private static final Logger LOG = LoggerFactory.getLogger(PubsubToGCSParquet.class);
 
-  private static final String JSON_AVRO_SCHEMA_STR = "{\n"
+  static final String JSON_AVRO_SCHEMA_STR = "{\n"
           + "       \"type\": \"record\",\n"
           + "       \"name\": \"Event\",\n"
           + "       \"namespace\": \"com.example.dataflow\",\n"
           + "        \"fields\": [\n"
-          + "         {\"name\": \"id\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"isActive\", \"type\": [\"null\", \"boolean\"]},\n"
-          + "         {\"name\": \"balance\", \"type\": [\"null\", \"double\"]},\n"
-          + "         {\"name\": \"picture\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"age\", \"type\": [\"null\", \"long\"]},\n"
-          + "         {\"name\": \"eyeColor\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"name\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"gender\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"company\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"email\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"phone\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"address\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"registered\", \"type\": [\"null\", \"long\"]},\n"
-          + "         {\"name\": \"latitude\", \"type\": [\"null\", \"double\"]},\n"
-          + "         {\"name\": \"longitude\", \"type\": [\"null\", \"double\"]},\n"
-          + "         {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\", default: []}},\n"
-          + "         {\"name\": \"timestamp\", \"type\": [\"null\", \"long\"]},\n"
-          + "         {\"name\": \"about\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"about2\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"about3\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"about4\", \"type\": [\"null\", \"string\"]},\n"
-          + "         {\"name\": \"about5\", \"type\": [\"null\", \"string\"]}\n"
+          + "         {\"name\": \"id\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"isActive\", \"type\": \"boolean\"},\n"
+          + "         {\"name\": \"balance\", \"type\": \"double\"},\n"
+          + "         {\"name\": \"picture\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"age\", \"type\": \"long\"},\n"
+          + "         {\"name\": \"eyeColor\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"name\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"gender\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"company\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"email\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"phone\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"address\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"registered\", \"type\": \"long\"},\n"
+          + "         {\"name\": \"latitude\", \"type\": \"double\"},\n"
+          + "         {\"name\": \"longitude\", \"type\": \"double\"},\n"
+          + "         {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\", \"default\": []}},\n"
+          + "         {\"name\": \"timestamp\", \"type\": \"long\"},\n"
+          + "         {\"name\": \"about\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"about2\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"about3\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"about4\", \"type\": \"string\"},\n"
+          + "         {\"name\": \"about5\", \"type\": \"string\"}\n"
           + "       ]\n"
           + "    }";
   static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
@@ -415,12 +415,11 @@ public class PubsubToGCSParquet {
 
     @ProcessElement
     public void processElement(ProcessContext context, PaneInfo pane) throws IOException {
+      // capture the element, decode it from JSON into a GenericRecord and send it downstream
+      PubsubMessage message = context.element();
+      String msgPayload = new String(message.getPayload());
       try {
-        // capture the element, decode it from JSON into a GenericRecord and send it downstream
-        PubsubMessage message = context.element();
-        JsonDecoder decoder = decoderFactory.jsonDecoder(schema, new String(message.getPayload()));
-        GenericDatumReader<GenericData.Record> reader = new GenericDatumReader<>(schema);
-        context.output(recordsToIngest, reader.read(null, decoder));
+        context.output(recordsToIngest, parseGenericRecord(decoderFactory, schema, msgPayload));
 
         // In case we are producing a GenericRecord, we can check if we are in the first pane
         // of the window and propagate a signal of data in the window. 
@@ -428,9 +427,16 @@ public class PubsubToGCSParquet {
           countPerBundle++;
           context.output(dataSignalOnWindow, true);
         }
-      } catch (IOException e) {
+      } catch (Exception e) {
+        LOG.warn("Error while trying to decode pubsub message {} with schema {}", msgPayload, schema);
         LOG.error("Error while decoding the JSON message", e);
       }
+    }
+
+    static GenericRecord parseGenericRecord(DecoderFactory decoderFactory, Schema schema, String jsonMsg) throws Exception {
+      JsonDecoder decoder = decoderFactory.jsonDecoder(schema, jsonMsg);
+      GenericDatumReader<GenericData.Record> reader = new GenericDatumReader<>(schema);
+      return reader.read(null, decoder);
     }
   }
 
