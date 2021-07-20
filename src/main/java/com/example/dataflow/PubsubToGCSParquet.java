@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Random;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import org.apache.avro.Schema;
@@ -46,6 +47,7 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -57,6 +59,7 @@ import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.ReadableFileCoder;
 import org.apache.beam.sdk.io.WriteFilesResult;
 import org.apache.beam.sdk.io.fs.CreateOptions;
+import org.apache.beam.sdk.io.fs.EmptyMatchTreatment;
 import org.apache.beam.sdk.io.fs.MoveOptions;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
@@ -76,7 +79,7 @@ import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
-import org.apache.beam.sdk.transforms.GroupIntoBatches;
+import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -287,11 +290,11 @@ public class PubsubToGCSParquet {
 
     void setComposeSmallFiles(Boolean value);
 
-    @Description("")
+    @Description("Number of files to be written after compose stage in a particular window (less files per window, bigger file sizes).")
     @Default.Integer(10)
-    Integer getFileCountPerCompose();
+    Integer getComposeShards();
 
-    void setFileCountPerCompose(Integer value);
+    void setComposeShards(Integer value);
 
     @Description("Cleans all files part after composing them (Parquet support included in this pipeline)")
     @Default.Boolean(true)
@@ -368,7 +371,7 @@ public class PubsubToGCSParquet {
                             .withComposeTempDirectory(options.getComposeTempDirectory())
                             .withComposeSmallFiles(options.getComposeSmallFiles())
                             .withCleanComposePartFiles(options.getCleanComposePartFiles())
-                            .withFileCountPerCompose(options.getFileCountPerCompose())
+                            .withComposeShards(options.getComposeShards())
                             .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
                             .withNumShards(options.getNumShards())
                             .withOutputDirectory(options.getOutputDirectory())
@@ -558,7 +561,7 @@ public class PubsubToGCSParquet {
     private ValueProvider<String> tempDirectory;
     private String windowDuration;
     private Integer numShards = 400;
-    private Integer fileCountPerCompose = 10;
+    private Integer composeShards = 10;
     private Boolean composeSmallFiles = false;
     private ValueProvider<String> composeTempDirectory;
     private ValueProvider<String> outputDirectory;
@@ -605,8 +608,8 @@ public class PubsubToGCSParquet {
       return this;
     }
 
-    public WriteFormatToGCS<DataT> withFileCountPerCompose(Integer fileCountPerCompose) {
-      this.fileCountPerCompose = fileCountPerCompose;
+    public WriteFormatToGCS<DataT> withComposeShards(Integer composeShards) {
+      this.composeShards = composeShards;
       return this;
     }
 
@@ -717,9 +720,8 @@ public class PubsubToGCSParquet {
                         .withFileNaming(naming)
                         .withFilePrefix(outputFilenamePrefix)
                         .withFileSuffix(outputFilenameSuffix)
-                        .withOriginalNumShards(numShards)
                         .withOutputPath(outputDirectory)
-                        .withFileCountPerCompose(fileCountPerCompose)
+                        .withComposeShards(composeShards)
                         .withSinkProvider(sinkProvider)
                         .withComposeFunction(composeFunction);
 
@@ -857,11 +859,10 @@ public class PubsubToGCSParquet {
    */
   static class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
 
-    private Integer fileCountPerCompose = 100;
+    private Integer composeShards = 10;
     private ValueProvider<String> outputPath;
     private ValueProvider<String> filePrefix;
     private ValueProvider<String> fileSuffix;
-    private Integer numShards;
     private Boolean cleanParts = true;
     private WindowedFileNaming naming;
     private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
@@ -899,13 +900,8 @@ public class PubsubToGCSParquet {
       return this;
     }
 
-    public ComposeGCSFiles<KeyT, DataT> withOriginalNumShards(Integer numShards) {
-      this.numShards = numShards;
-      return this;
-    }
-
-    public ComposeGCSFiles<KeyT, DataT> withFileCountPerCompose(Integer fileCount) {
-      this.fileCountPerCompose = fileCount;
+    public ComposeGCSFiles<KeyT, DataT> withComposeShards(Integer composeShards) {
+      this.composeShards = composeShards;
       return this;
     }
 
@@ -940,16 +936,17 @@ public class PubsubToGCSParquet {
 
       return input
               // first match all the files to be processed
-              .apply("MatchFiles", FileIO.matchAll())
+              .apply("MatchFiles", FileIO.matchAll()
+                      .withEmptyMatchTreatment(EmptyMatchTreatment.ALLOW))
               // capture readable matches
               .apply("ToReadable", FileIO.readMatches())
               // group into batches
-              .apply(WithKeys.of((Void) null))
-              .apply("GroupIntoBatches", GroupIntoBatches.ofSize(
-                      numShards <= fileCountPerCompose ? numShards : fileCountPerCompose))
+              .apply(WithKeys.of(v -> new Random().nextInt(composeShards)))
+              .setCoder(KvCoder.of(VarIntCoder.of(), ReadableFileCoder.of()))
+              .apply(GroupByKey.create())
               // create the file bundles that will compone the composed files
               .apply("CreateComposeBundles", ParDo.of(
-                      new CreateComposeBundles<>(naming, numShards, fileCountPerCompose)))
+                      new CreateComposeBundles(naming, composeShards)))
               // materialize this results, making bundles stable
               .apply("ReshuffleBundles",
                       org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
@@ -1159,21 +1156,16 @@ public class PubsubToGCSParquet {
         if (tempResource != null) {
           FileSystems.copy(Arrays.asList(tempResource), Arrays.asList(FileSystems.matchNewResource(fileDestination, false)));
           LOG.debug("Copied temp file in {}ms", System.currentTimeMillis() - startTime);
-          context.output(
-                  ComposeContext.of(composeCtx.shard,
-                          composeCtx.totalShards,
-                          fileDestination,
-                          composeCtx.composedTempFile,
-                          composeCtx.partFiles));
         } else {
           LOG.warn("Composed source not found (possible deletion upstream) {}, skipping.", composeCtx.composedTempFile);
-          context.output(
-                  ComposeContext.of(composeCtx.shard,
-                          composeCtx.totalShards,
-                          null,
-                          composeCtx.composedTempFile,
-                          composeCtx.partFiles));
         }
+        context.output(
+                ComposeContext.of(
+                        composeCtx.shard,
+                        composeCtx.totalShards,
+                        fileDestination,
+                        composeCtx.composedTempFile,
+                        composeCtx.partFiles));
       }
     }
 
@@ -1181,7 +1173,7 @@ public class PubsubToGCSParquet {
      * Given a KV of destinations and strings iterable, it will create the bundles that will be composed, the compose files won't have more
      * than 32 parts (current GCS operation limit).
      */
-    static class CreateComposeBundles<KeyT> extends DoFn<KV<KeyT, Iterable<FileIO.ReadableFile>>, ComposeContext> {
+    static class CreateComposeBundles extends DoFn<KV<Integer, Iterable<FileIO.ReadableFile>>, ComposeContext> {
 
       private static final Logger LOG = LoggerFactory.getLogger(CreateComposeBundles.class);
 
@@ -1189,14 +1181,9 @@ public class PubsubToGCSParquet {
       private final Integer totalBundles;
       private String tempPathName;
 
-      @StateId("currentNumShard")
-      private final StateSpec<ValueState<Integer>> currentNumShard = StateSpecs.value();
-
-      public CreateComposeBundles(WindowedFileNaming naming, Integer originalNumShards, Integer filesPerCompose) {
+      public CreateComposeBundles(WindowedFileNaming naming, Integer totalBundles) {
         this.naming = naming;
-        this.totalBundles = originalNumShards % filesPerCompose == 0
-                ? originalNumShards / filesPerCompose
-                : (originalNumShards / filesPerCompose) + 1;
+        this.totalBundles = totalBundles;
       }
 
       @StartBundle
@@ -1208,32 +1195,27 @@ public class PubsubToGCSParquet {
 
       @ProcessElement
       public void processElement(
-              @StateId("currentNumShard") ValueState<Integer> state,
               ProcessContext context,
               BoundedWindow window,
               PaneInfo pane) throws IOException {
-        // Grab current shard number from state
-        int currentShard = MoreObjects.firstNonNull(state.read(), 1);
+        Integer currentKey = context.element().getKey();
 
         String tempFilePartialFileName
-                = tempPathName + naming.getFilename(window, pane, totalBundles, currentShard, Compression.UNCOMPRESSED);
+                = tempPathName + naming.getFilename(window, pane, totalBundles, currentKey, Compression.UNCOMPRESSED);
 
         List<FileIO.ReadableFile> composeParts = StreamSupport
                 .stream(context.element().getValue().spliterator(), false)
                 .collect(Collectors.toList());
 
-        LOG.debug("Will compose {} parts into {}.", composeParts.size(), tempFilePartialFileName);
+        LOG.info("For key {} will compose {} parts into {}.", currentKey, composeParts.size(), tempFilePartialFileName);
 
         context.output(
                 ComposeContext.of(
-                        currentShard,
+                        currentKey,
                         totalBundles,
                         null,
                         tempFilePartialFileName,
                         composeParts));
-
-        // Update the state.
-        state.write(currentShard + 1);
       }
     }
 

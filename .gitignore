@@ -26,4 +26,6 @@ hs_err_pid*
 target/
 *.DS_Store
 nb*.xml
-*_local.sh
+launch_*.sh
+check_*.sh
+!launch_datagen_templates.sh
