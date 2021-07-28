@@ -13,8 +13,10 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
-package com.example.dataflow;
+package com.example.dataflow.transforms;
 
+import com.example.dataflow.PStoGCSParquetOptions;
+import com.example.dataflow.PubsubToGCSParquet;
 import java.io.File;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -25,7 +27,6 @@ import java.util.stream.StreamSupport;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
-import org.apache.avro.io.DecoderFactory;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
@@ -48,7 +49,7 @@ import org.junit.rules.TemporaryFolder;
 /**
  *
  */
-public class PubsubToGCSParquetTest {
+public class ComposeFilesTest {
 
   private static final String SCHEMA_STRING
           = "{"
@@ -66,10 +67,10 @@ public class PubsubToGCSParquetTest {
             "Faraday", "Newton", "Bohr", "Galilei", "Maxwell"
           };
 
-  static final private PubsubToGCSParquet.PStoGCSParquetOptions options;
+  static final private PStoGCSParquetOptions options;
 
   static {
-    options = PipelineOptionsFactory.as(PubsubToGCSParquet.PStoGCSParquetOptions.class);
+    options = PipelineOptionsFactory.as(PStoGCSParquetOptions.class);
     options.setTempLocation("gs://discord-load-test-pabs/test-compose/");
   }
 
@@ -80,7 +81,7 @@ public class PubsubToGCSParquetTest {
   @Rule
   public transient TemporaryFolder temporaryFolder = new TemporaryFolder();
 
-  public PubsubToGCSParquetTest() {
+  public ComposeFilesTest() {
   }
 
   private List<GenericRecord> generateGenericRecords(long count) {
@@ -121,8 +122,8 @@ public class PubsubToGCSParquetTest {
 
     String destinationPath = temporaryFolder.getRoot().getAbsolutePath() + "/compose-output.parquet";
 
-    PubsubToGCSParquet.ComposeGCSFiles.ComposeFiles<GenericRecord> cfiles
-            = new PubsubToGCSParquet.ComposeGCSFiles.ComposeFiles<GenericRecord>()
+    ComposeGCSFiles.ComposeFiles<GenericRecord> cfiles
+            = new ComposeGCSFiles.ComposeFiles<GenericRecord>()
                     .withSinkProvider(
                             () -> ParquetIO
                                     .sink(SCHEMA)
@@ -131,10 +132,10 @@ public class PubsubToGCSParquetTest {
 
     // register coder for the test pipeline
     testPipeline.getCoderRegistry().registerCoderForClass(
-            PubsubToGCSParquet.ComposeGCSFiles.ComposeContext.class,
-            PubsubToGCSParquet.ComposeGCSFiles.ComposeContextCoder.of());
+            ComposeGCSFiles.ComposeContext.class,
+            ComposeGCSFiles.ComposeContextCoder.of());
 
-    PCollection<PubsubToGCSParquet.ComposeGCSFiles.ComposeContext> ctxPC
+    PCollection<ComposeGCSFiles.ComposeContext> ctxPC
             = testPipeline
                     .apply(Create.of(resourceList))
                     // first match all the files to be processed
@@ -145,9 +146,9 @@ public class PubsubToGCSParquetTest {
                     .apply(WithKeys.of((Void) null))
                     .apply(GroupByKey.create())
                     .apply(MapElements
-                            .into(TypeDescriptor.of(PubsubToGCSParquet.ComposeGCSFiles.ComposeContext.class))
+                            .into(TypeDescriptor.of(ComposeGCSFiles.ComposeContext.class))
                             .via(readableFiles
-                                    -> PubsubToGCSParquet.ComposeGCSFiles.ComposeContext.of(
+                                    -> ComposeGCSFiles.ComposeContext.of(
                                     1,
                                     1,
                                     null,
@@ -160,10 +161,10 @@ public class PubsubToGCSParquetTest {
 
     PAssert.that(ctxPC).satisfies(elem -> {
       Assert.assertNotNull(elem);
-      List<PubsubToGCSParquet.ComposeGCSFiles.ComposeContext> composeCtxs
+      List<ComposeGCSFiles.ComposeContext> composeCtxs
               = StreamSupport.stream(elem.spliterator(), false).collect(Collectors.toList());
       Assert.assertEquals(1, composeCtxs.size());
-      PubsubToGCSParquet.ComposeGCSFiles.ComposeContext composeCtx = composeCtxs.get(0);
+      ComposeGCSFiles.ComposeContext composeCtx = composeCtxs.get(0);
       File output = Paths.get(destinationPath).toFile();
       Assert.assertEquals(output.isFile(), true);
       Assert.assertTrue("Output file should not be empty.", 0 <= output.length());
@@ -171,23 +172,6 @@ public class PubsubToGCSParquetTest {
     });
 
     testPipeline.run().waitUntilFinish();
-  }
-
-  @Test(expected = Exception.class)
-  public void testIncompleteDataShouldThrowException() throws Exception {
-    String avroSchema = "{\n"
-            + "  \"type\": \"record\",\n"
-            + "  \"name\": \"Event\",\n"
-            + "  \"namespace\": \"com.example.dataflow\",\n"
-            + "  \"fields\": [\n"
-            + "    {\"name\": \"id\", \"type\": \"string\"},\n"
-            + "    {\"name\": \"about\", \"type\": \"string\"}\n"
-            + "  ]\n"
-            + "}";
-    String jsonMessage = "{\"id\":\"0ef8e890-6bd9-460b-8103-8b2b013cf85a\"}";
-    DecoderFactory decoderFactory = new DecoderFactory();
-    Schema schema = new Schema.Parser().parse(avroSchema);
-    GenericRecord gr = PubsubToGCSParquet.PubsubMessageToArchiveDoFn.parseGenericRecord(decoderFactory, schema, jsonMessage);
   }
 
 }
