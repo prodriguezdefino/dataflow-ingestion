@@ -25,6 +25,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -46,6 +48,8 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.AvroGenericCoder;
+import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
@@ -117,7 +121,7 @@ import org.slf4j.LoggerFactory;
  * directory.
  *
  * <p>
- * Files output will have the following schema:
+ * Output files will have the following schema:
  *
  * <pre>
  *   {
@@ -160,6 +164,7 @@ import org.slf4j.LoggerFactory;
  * -Dexec.cleanupDaemonThreads=false \
  * -Dexec.args=" \
  * --project=${PROJECT_ID} \
+ * --avroSchemaFileLocation='avro-schema.json' \
  * --jobName='pubsubtogcsparquet' \
  * --composeTempDirectory=gs://${PROJECT_ID}/files-temp-dir/pre-compose/ \
  * --stagingLocation=gs://${PROJECT_ID}/dataflow/staging \
@@ -181,37 +186,6 @@ import org.slf4j.LoggerFactory;
 public class PubsubToGCSParquet {
 
   private static final Logger LOG = LoggerFactory.getLogger(PubsubToGCSParquet.class);
-
-  static final String JSON_AVRO_SCHEMA_STR = "{\n"
-          + "       \"type\": \"record\",\n"
-          + "       \"name\": \"Event\",\n"
-          + "       \"namespace\": \"com.example.dataflow\",\n"
-          + "        \"fields\": [\n"
-          + "         {\"name\": \"id\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"isActive\", \"type\": \"boolean\"},\n"
-          + "         {\"name\": \"balance\", \"type\": \"double\"},\n"
-          + "         {\"name\": \"picture\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"age\", \"type\": \"long\"},\n"
-          + "         {\"name\": \"eyeColor\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"name\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"gender\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"company\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"email\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"phone\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"address\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"registered\", \"type\": \"long\"},\n"
-          + "         {\"name\": \"latitude\", \"type\": \"double\"},\n"
-          + "         {\"name\": \"longitude\", \"type\": \"double\"},\n"
-          + "         {\"name\": \"tags\", \"type\": {\"type\": \"array\", \"items\": \"string\", \"default\": []}},\n"
-          + "         {\"name\": \"timestamp\", \"type\": \"long\"},\n"
-          + "         {\"name\": \"about\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"about2\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"about3\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"about4\", \"type\": \"string\"},\n"
-          + "         {\"name\": \"about5\", \"type\": \"string\"}\n"
-          + "       ]\n"
-          + "    }";
-  static final Schema AVRO_SCHEMA = new Schema.Parser().parse(JSON_AVRO_SCHEMA_STR);
 
   /**
    * Options supported by the pipeline.
@@ -298,6 +272,12 @@ public class PubsubToGCSParquet {
 
     void setCleanComposePartFiles(Boolean value);
 
+    @Description("Local path to the AVRO schema to use.")
+    @Validation.Required
+    String getAvroSchemaFileLocation();
+
+    void setAvroSchemaFileLocation(String value);
+
   }
 
   /**
@@ -305,7 +285,7 @@ public class PubsubToGCSParquet {
    *
    * @param args The command-line arguments to the pipeline.
    */
-  public static void main(String[] args) {
+  public static void main(String[] args) throws IOException {
 
     PStoGCSParquetOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(PStoGCSParquetOptions.class);
 
@@ -318,17 +298,18 @@ public class PubsubToGCSParquet {
    * @param options The execution parameters to the pipeline.
    * @return The result of the pipeline execution.
    */
-  static PipelineResult run(PStoGCSParquetOptions options) {
+  static PipelineResult run(PStoGCSParquetOptions options) throws IOException {
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
 
-    // In order to correctly use PTransform that receives a PCollectionTuple 
-    // with a GenericRecord as one of its tags we need to set a coder for it
-    pipeline.getCoderRegistry().registerCoderForClass(GenericRecord.class, AvroCoder.of(AVRO_SCHEMA));
+    // read AVRO schema from local filesystem
+    final String avroSchemaStr = Files.readAllLines(Paths.get(options.getAvroSchemaFileLocation()))
+            .stream()
+            .collect(Collectors.joining("\n"));
 
-    // create the tuple tags for data to ingest and data signals on windows
-    TupleTag<Boolean> dataOnWindowSignals = WriteFormatToGCS.dataOnWindowSignalTag();
-    TupleTag<GenericRecord> dataToIngest = WriteFormatToGCS.<GenericRecord>dataToIngestTag();
+    LOG.info("Pipeline will be using AVRO schema:\n{}", avroSchemaStr);
+
+    final Schema avroSchema = new Schema.Parser().parse(avroSchemaStr);
 
     /*
      * Steps:
@@ -348,22 +329,15 @@ public class PubsubToGCSParquet {
                             .withAllowedLateness(parseDuration(options.getWindowDuration()).dividedBy(4L))
                             .discardingFiredPanes())
             .apply("ExtractGenericRecord",
-                    ParDo.of(
-                            new PubsubMessageToArchiveDoFn(
-                                    JSON_AVRO_SCHEMA_STR,
-                                    dataToIngest,
-                                    dataOnWindowSignals))
-                            .withOutputTags(
-                                    dataToIngest,
-                                    TupleTagList.of(dataOnWindowSignals)))
+                    ParDo.of(new PubsubMessageToArchiveDoFn(avroSchemaStr)))
+            .setCoder(AvroCoder.of(avroSchema))
             .apply("WriteParquetToGCS",
                     WriteFormatToGCS.<GenericRecord>create()
                             .withSinkProvider(
                                     () -> ParquetIO
-                                            .sink(AVRO_SCHEMA)
+                                            .sink(new Schema.Parser().parse(avroSchemaStr))
                                             .withCompressionCodec(CompressionCodecName.SNAPPY))
-                            .withDataToIngestTag(dataToIngest)
-                            .withDataOnWindowSignalsTag(dataOnWindowSignals)
+                            .withCoder(AvroCoder.of(avroSchema))
                             .withComposeTempDirectory(options.getComposeTempDirectory())
                             .withComposeSmallFiles(options.getComposeSmallFiles())
                             .withCleanComposePartFiles(options.getCleanComposePartFiles())
@@ -389,17 +363,11 @@ public class PubsubToGCSParquet {
 
     private DecoderFactory decoderFactory;
     private Schema schema;
-    private Long countPerBundle = 0L;
 
     private final String avroSchemaStr;
-    private final TupleTag<GenericRecord> recordsToIngest;
-    private final TupleTag<Boolean> dataSignalOnWindow;
 
-    public PubsubMessageToArchiveDoFn(String schema,
-            TupleTag<GenericRecord> recordsToIngest, TupleTag<Boolean> dataSignalOnWindow) {
+    public PubsubMessageToArchiveDoFn(String schema) {
       this.avroSchemaStr = schema;
-      this.recordsToIngest = recordsToIngest;
-      this.dataSignalOnWindow = dataSignalOnWindow;
     }
 
     @Setup
@@ -408,25 +376,13 @@ public class PubsubToGCSParquet {
       schema = new Schema.Parser().parse(avroSchemaStr);
     }
 
-    @StartBundle
-    public void startBundle() {
-      countPerBundle = 0L;
-    }
-
     @ProcessElement
     public void processElement(ProcessContext context, PaneInfo pane) throws IOException {
       // capture the element, decode it from JSON into a GenericRecord and send it downstream
       PubsubMessage message = context.element();
       String msgPayload = new String(message.getPayload());
       try {
-        context.output(recordsToIngest, parseGenericRecord(decoderFactory, schema, msgPayload));
-
-        // In case we are producing a GenericRecord, we can check if we are in the first pane
-        // of the window and propagate a signal of data in the window. 
-        if (pane.isFirst() && countPerBundle == 0L) {
-          countPerBundle++;
-          context.output(dataSignalOnWindow, true);
-        }
+        context.output(parseGenericRecord(decoderFactory, schema, msgPayload));
       } catch (Exception e) {
         LOG.warn("Error while trying to decode pubsub message {} with schema {}", msgPayload, schema);
         LOG.error("Error while decoding the JSON message", e);
@@ -554,15 +510,14 @@ public class PubsubToGCSParquet {
    * Writes files in GCS using a defined format, can be configured to compose small files and create success files on windows (with or
    * without data being present).
    */
-  static class WriteFormatToGCS<DataT> extends PTransform<PCollectionTuple, PDone> {
+  static class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDone> {
 
-    private TupleTag<Boolean> dataOnWindowSignals;
-    private TupleTag<DataT> dataToIngest;
     private ValueProvider<String> outputFilenamePrefix;
     private ValueProvider<String> outputFilenameSuffix;
     private ValueProvider<String> tempDirectory;
     private String windowDuration;
     private Integer numShards = 400;
+    private Integer fanoutShards = 400;
     private Integer composeShards = 10;
     private Boolean composeSmallFiles = false;
     private ValueProvider<String> composeTempDirectory;
@@ -571,6 +526,7 @@ public class PubsubToGCSParquet {
     private Boolean createSuccessFile = true;
     private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
     private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
+    private Coder<DataT> coder;
 
     private WriteFormatToGCS() {
     }
@@ -615,6 +571,11 @@ public class PubsubToGCSParquet {
       return this;
     }
 
+    public WriteFormatToGCS<DataT> withFanoutShards(Integer fanoutShards) {
+      this.fanoutShards = fanoutShards;
+      return this;
+    }
+
     public WriteFormatToGCS<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
       this.composeSmallFiles = composeSmallFiles;
       return this;
@@ -630,16 +591,6 @@ public class PubsubToGCSParquet {
       return this;
     }
 
-    public WriteFormatToGCS<DataT> withDataToIngestTag(TupleTag<DataT> dataToIngest) {
-      this.dataToIngest = dataToIngest;
-      return this;
-    }
-
-    public WriteFormatToGCS<DataT> withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
-      this.dataOnWindowSignals = dataOnWindowSignals;
-      return this;
-    }
-
     public WriteFormatToGCS<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
       this.sinkProvider = sinkProvider;
       return this;
@@ -647,6 +598,11 @@ public class PubsubToGCSParquet {
 
     public WriteFormatToGCS<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
       this.composeFunction = composeFunction;
+      return this;
+    }
+
+    private WriteFormatToGCS<DataT> withCoder(Coder<DataT> coder) {
+      this.coder = coder;
       return this;
     }
 
@@ -675,16 +631,11 @@ public class PubsubToGCSParquet {
       checkArgument(outputDirectory != null, "An output directory should be provided using with method");
       checkArgument(sinkProvider != null,
               "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
-      checkArgument(dataOnWindowSignals != null && dataToIngest != null,
-              "Proper TupleTags must be configured for this transform unsing with*Tag method.");
+      checkArgument(coder != null, "A coder must be provided.");
     }
 
     @Override
-    public PDone expand(PCollectionTuple input) {
-      // check if the expected tags are included in the PCollectionTuple
-      if (!input.has(dataOnWindowSignals) || !input.has(dataToIngest)) {
-        throw new IllegalArgumentException("Writes to GCS expects 2 tuple tags on PCollection (data to ingest and signals on windows).");
-      }
+    public PDone expand(PCollection<DataT> input) {
 
       if (composeSmallFiles && composeTempDirectory.isAccessible()) {
         checkArgument(composeTempDirectory.get() != null,
@@ -697,20 +648,44 @@ public class PubsubToGCSParquet {
               outputFilenameSuffix,
               RandomStringUtils.randomAlphanumeric(5));
 
+      TupleTag<Boolean> dataOnWindowSignalsTag = null;
+      PCollection<DataT> dataToBeWritten = null;
+      PCollection<Boolean> dataOnWindowSignals = null;
+
+      if (createSuccessFile) {
+        // create the tuple tags for data to ingest and data signals on windows
+        dataOnWindowSignalsTag = CreateSuccessFiles.dataOnWindowSignalTag();
+        TupleTag<DataT> dataToBeIngestedTag = new TupleTag<DataT>() {
+        };
+
+        // capture the data on window signals, having two outputs sinals with data occurring and the data to be ingested
+        PCollectionTuple dataSignalsCaptured
+                = input.apply("CaptureDataOnWindow",
+                        ParDo.of(new CaptureDataOnWindowSignals<>(dataOnWindowSignalsTag, dataToBeIngestedTag))
+                                .withOutputTags(dataToBeIngestedTag, TupleTagList.of(dataOnWindowSignalsTag)));
+
+        // initialize the references
+        dataToBeWritten = dataSignalsCaptured.get(dataToBeIngestedTag);
+        dataOnWindowSignals = dataSignalsCaptured.get(dataOnWindowSignalsTag);
+      } else {
+        dataToBeWritten = input;
+      }
+
       // capture data to be ingested and send it to GCS (as final or temp yet to be determined)
-      WriteFilesResult<Void> writtenFiles = input
-              .get(dataToIngest)
-              .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
-                      FileIO.<DataT>write()
-                              .via(sinkProvider.apply())
-                              .withTempDirectory(tempDirectory)
-                              // we will use the same naming for all writes (final or temps) to ease debugging (when needed)
-                              .withNaming(naming)
-                              .withNumShards(numShards)
-                              // in case we are composing the files we need to send the initial writes to a temp location
-                              .to(composeSmallFiles
-                                      ? composeTempDirectory
-                                      : outputDirectory));
+      WriteFilesResult<Void> writtenFiles
+              = dataToBeWritten
+                      .setCoder(coder)
+                      .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
+                              FileIO.<DataT>write()
+                                      .via(sinkProvider.apply())
+                                      .withTempDirectory(tempDirectory)
+                                      // we will use the same naming for all writes (final or temps) to ease debugging (when needed)
+                                      .withNaming(naming)
+                                      .withNumShards(numShards)
+                                      // in case we are composing the files we need to send the initial writes to a temp location
+                                      .to(composeSmallFiles
+                                              ? composeTempDirectory
+                                              : outputDirectory));
 
       PCollection<String> fileNames = null;
 
@@ -746,22 +721,54 @@ public class PubsubToGCSParquet {
                   .apply("RemoveVoidKeys", Values.create());
         }
 
-        // Process an empty window, in case no data is coming from pubsub
-        input
-                .get(dataOnWindowSignals)
-                // create a SUCCESS file if the window is empty
-                .apply("ProcessEmptyWindows",
-                        WriteSuccessFileOnEmptyWindow.create()
-                                .withOutputDirectory(outputDirectory)
-                                .withNumShards(numShards)
-                                .withWindowDuration(windowDuration));
+        TupleTag<String> processedDataTag = CreateSuccessFiles.processedDataTag();
 
-        // also, process after files get writen to destination
-        fileNames
-                .apply("WriteSuccessFile", CreateSuccessFile.create());
+        PCollectionTuple createSuccessFileInputData
+                = PCollectionTuple
+                        .of(processedDataTag, fileNames)
+                        .and(dataOnWindowSignalsTag, dataOnWindowSignals);
+
+        // Create SUCCESS files for empty of populated windows.
+        createSuccessFileInputData.apply("CreateSuccessFiles",
+                CreateSuccessFiles.create()
+                        .withDataOnWindowSignalsTag(dataOnWindowSignalsTag)
+                        .withProcessedDataTag(processedDataTag)
+                        .withFanoutShards(fanoutShards)
+                        .withWindowDuration(windowDuration)
+                        .withOutputDirectory(outputDirectory));
       }
 
       return PDone.in(input.getPipeline());
+    }
+
+    static class CaptureDataOnWindowSignals<DataT> extends DoFn<DataT, DataT> {
+
+      private final TupleTag<Boolean> dataOnWindowSignals;
+      private final TupleTag<DataT> dataToBeProcessed;
+      private Long countPerBundle = 0L;
+
+      public CaptureDataOnWindowSignals(TupleTag<Boolean> dataOnWindowSignals, TupleTag<DataT> dataToBeProcessed) {
+        this.dataOnWindowSignals = dataOnWindowSignals;
+        this.dataToBeProcessed = dataToBeProcessed;
+      }
+
+      @StartBundle
+      public void startBundle() {
+        countPerBundle = 0L;
+      }
+
+      @ProcessElement
+      public void processElement(ProcessContext context, PaneInfo pane) throws IOException {
+        context.output(dataToBeProcessed, context.element());
+
+        // In case we are producing a GenericRecord, we can check if we are in the first pane
+        // of the window and propagate a signal of data in the window. 
+        if (pane.isFirst() && countPerBundle == 0L) {
+          countPerBundle++;
+          context.output(dataOnWindowSignals, true);
+        }
+      }
+
     }
   }
 
@@ -771,7 +778,7 @@ public class PubsubToGCSParquet {
    */
   static class CreateSuccessFile extends PTransform<PCollection<String>, PCollection<Void>> {
 
-    private Integer numShards = 1;
+    private Integer fanoutShards = 10;
 
     public CreateSuccessFile() {
     }
@@ -780,8 +787,8 @@ public class PubsubToGCSParquet {
       return new CreateSuccessFile();
     }
 
-    public CreateSuccessFile withNumShards(Integer numShards) {
-      this.numShards = numShards;
+    public CreateSuccessFile withFanoutShards(Integer fanoutShards) {
+      this.fanoutShards = fanoutShards;
       return this;
     }
 
@@ -792,7 +799,7 @@ public class PubsubToGCSParquet {
               // wait for all the files in the current window
               .apply("CombineFilesInWindow",
                       Combine.globally(CombineFilesNamesInList.create())
-                              .withFanout(numShards)
+                              .withFanout(fanoutShards)
                               .withoutDefaults())
               .apply("CreateSuccessFile", ParDo.of(new SuccessFileWriteDoFn()));
     }
@@ -853,6 +860,95 @@ public class PubsubToGCSParquet {
           context.output((Void) null);
         }
       }
+    }
+  }
+
+  /**
+   * Creates SUCCESS files based on the data contained in 2 tuples of the PCollectionTuple: data that has been processed (processedData) and
+   * signals of data found in a window (dataOnWindowSignals).
+   */
+  static class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
+
+    private TupleTag<Boolean> dataOnWindowSignals;
+    private TupleTag<String> processedData;
+    private Integer fanoutShards = 10;
+    private String windowDuration;
+    private ValueProvider<String> outputDirectory;
+
+    public CreateSuccessFiles withProcessedDataTag(TupleTag<String> processedData) {
+      this.processedData = processedData;
+      return this;
+    }
+
+    public CreateSuccessFiles withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
+      this.dataOnWindowSignals = dataOnWindowSignals;
+      return this;
+    }
+
+    public CreateSuccessFiles withOutputDirectory(ValueProvider<String> outputDirectory) {
+      this.outputDirectory = outputDirectory;
+      return this;
+    }
+
+    public CreateSuccessFiles withWindowDuration(String windowDuration) {
+      this.windowDuration = windowDuration;
+      return this;
+    }
+
+    public CreateSuccessFiles withFanoutShards(Integer fanoutShards) {
+      this.fanoutShards = fanoutShards;
+      return this;
+    }
+
+    public static CreateSuccessFiles create() {
+      return new CreateSuccessFiles();
+    }
+
+    public static <String> TupleTag<String> processedDataTag() {
+      return new TupleTag<String>() {
+      };
+    }
+
+    public static TupleTag<Boolean> dataOnWindowSignalTag() {
+      return new TupleTag<Boolean>() {
+      };
+    }
+
+    @Override
+    public void validate(PipelineOptions options) {
+      super.validate(options);
+
+      checkArgument(windowDuration != null, "A window duration should be provided using withWindowDuration method");
+      checkArgument(outputDirectory != null, "An output directory should be provided using with method");
+      checkArgument(dataOnWindowSignals != null && processedData != null,
+              "Proper TupleTags must be configured for this transform unsing with*Tag method.");
+    }
+
+    @Override
+    public PDone expand(PCollectionTuple input) {
+      // check if the expected tags are included in the PCollectionTuple
+      if (!input.has(dataOnWindowSignals) || !input.has(processedData)) {
+        throw new IllegalArgumentException("Writes to GCS expects 2 tuple tags on PCollection (data to ingest and signals on windows).");
+      }
+
+      // Process an empty window, in case no data is coming from pubsub
+      input
+              .get(dataOnWindowSignals)
+              // create a SUCCESS file if the window is empty
+              .apply("ProcessEmptyWindows",
+                      WriteSuccessFileOnEmptyWindow.create()
+                              .withOutputDirectory(outputDirectory)
+                              .withFanoutShards(fanoutShards)
+                              .withWindowDuration(windowDuration));
+
+      // also, process the PCollection with info of files that were writen to destination
+      input
+              .get(processedData)
+              .apply("WriteSuccessFile",
+                      CreateSuccessFile.create()
+                              .withFanoutShards(fanoutShards));
+
+      return PDone.in(input.getPipeline());
     }
   }
 
@@ -1278,7 +1374,7 @@ public class PubsubToGCSParquet {
   static class WriteSuccessFileOnEmptyWindow extends PTransform<PCollection<Boolean>, PDone> {
 
     private String windowDuration;
-    private Integer numShards;
+    private Integer fanoutShards = 10;
     private ValueProvider<String> outputDirectory;
 
     private WriteSuccessFileOnEmptyWindow() {
@@ -1288,8 +1384,8 @@ public class PubsubToGCSParquet {
       return new WriteSuccessFileOnEmptyWindow();
     }
 
-    public WriteSuccessFileOnEmptyWindow withNumShards(Integer numShards) {
-      this.numShards = numShards;
+    public WriteSuccessFileOnEmptyWindow withFanoutShards(Integer fanoutShards) {
+      this.fanoutShards = fanoutShards;
       return this;
     }
 
@@ -1309,7 +1405,6 @@ public class PubsubToGCSParquet {
 
       checkArgument(windowDuration != null, "A window duration should be provided using the withWindowDuration method.");
       checkArgument(outputDirectory != null, "An output directory should be provided using the withOutputDirectory method.");
-      checkArgument(numShards != null, "A number of shards should be provided using the withNumShards method.");
     }
 
     @Override
@@ -1333,7 +1428,7 @@ public class PubsubToGCSParquet {
               .apply("CountOnWindow",
                       Combine.globally(Count.<Boolean>combineFn())
                               .withoutDefaults()
-                              .withFanout(numShards))
+                              .withFanout(fanoutShards))
               .apply("CheckDummySignal", ParDo.of(new CheckDataSignalOnWindowDoFn(outputDirectory)));
       return PDone.in(input.getPipeline());
     }

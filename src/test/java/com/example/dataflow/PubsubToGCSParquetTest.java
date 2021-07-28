@@ -1,7 +1,17 @@
 /*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
+ * Copyright (C) 2021 Google Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
  */
 package com.example.dataflow;
 
@@ -16,9 +26,7 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.avro.io.DecoderFactory;
-import org.apache.avro.reflect.Nullable;
 import org.apache.beam.sdk.coders.AvroCoder;
-import org.apache.beam.sdk.coders.DefaultCoder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -39,7 +47,6 @@ import org.junit.rules.TemporaryFolder;
 
 /**
  *
- * @author rpablo
  */
 public class PubsubToGCSParquetTest {
 
@@ -167,10 +174,19 @@ public class PubsubToGCSParquetTest {
   }
 
   @Test(expected = Exception.class)
-  public void testIncompleteData() throws Exception {
+  public void testIncompleteDataShouldThrowException() throws Exception {
+    String avroSchema = "{\n"
+            + "  \"type\": \"record\",\n"
+            + "  \"name\": \"Event\",\n"
+            + "  \"namespace\": \"com.example.dataflow\",\n"
+            + "  \"fields\": [\n"
+            + "    {\"name\": \"id\", \"type\": \"string\"},\n"
+            + "    {\"name\": \"about\", \"type\": \"string\"}\n"
+            + "  ]\n"
+            + "}";
     String jsonMessage = "{\"id\":\"0ef8e890-6bd9-460b-8103-8b2b013cf85a\"}";
     DecoderFactory decoderFactory = new DecoderFactory();
-    Schema schema = new Schema.Parser().parse(PubsubToGCSParquet.JSON_AVRO_SCHEMA_STR);
+    Schema schema = new Schema.Parser().parse(avroSchema);
     GenericRecord gr = PubsubToGCSParquet.PubsubMessageToArchiveDoFn.parseGenericRecord(decoderFactory, schema, jsonMessage);
   }
 
