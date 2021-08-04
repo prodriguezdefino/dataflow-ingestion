@@ -32,10 +32,11 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
   private ValueProvider<String> outputFilenamePrefix;
   private ValueProvider<String> outputFilenameSuffix;
   private ValueProvider<String> tempDirectory;
-  private String windowDuration;
+  private String successFileWindowDuration;
   private Integer numShards = 400;
   private Integer fanoutShards = 400;
   private Integer composeShards = 10;
+  private Boolean hourlySuccessFiles = false;
   private Boolean composeSmallFiles = false;
   private ValueProvider<String> composeTempDirectory;
   private ValueProvider<String> outputDirectory;
@@ -73,8 +74,16 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withWindowDuration(String windowDuration) {
-    this.windowDuration = windowDuration;
+  public WriteFormatToGCS<DataT> withSuccessFilesWindowDuration(String duration) {
+    this.successFileWindowDuration = duration;
+    return this;
+  }
+
+  public WriteFormatToGCS<DataT> withHourlySuccessFiles(Boolean value) {
+    this.hourlySuccessFiles = value;
+    if (value) {
+      this.successFileWindowDuration = "60m";
+    }
     return this;
   }
 
@@ -144,11 +153,9 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
     checkArgument(outputFilenamePrefix != null, "A file prefix should be provided using with method");
     checkArgument(outputFilenameSuffix != null, "A file suffix should be provided using with method");
     checkArgument(tempDirectory != null, "A temporary directory should be provided using with method");
-    checkArgument(windowDuration != null, "A window duration should be provided using withWindowDuration method");
     checkArgument(outputDirectory != null, "An output directory should be provided using with method");
     checkArgument(sinkProvider != null,
             "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
-    checkArgument(coder != null, "A coder must be provided.");
   }
 
   @Override
@@ -164,6 +171,14 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
             outputFilenamePrefix,
             outputFilenameSuffix,
             RandomStringUtils.randomAlphanumeric(5));
+
+    if (hourlySuccessFiles) {
+      naming = naming.cloneWithHourlyPaths();
+    } else {
+      checkArgument(successFileWindowDuration != null,
+              "A window duration should be provided for success file using withSuccessFileWindowDuration method "
+              + "when duration not explicitly set");
+    }
 
     TupleTag<Boolean> dataOnWindowSignalsTag = null;
     PCollection<DataT> dataToBeWritten = null;
@@ -188,10 +203,13 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
       dataToBeWritten = input;
     }
 
+    if (coder != null) {
+      dataToBeWritten = dataToBeWritten.setCoder(coder);
+    }
+
     // capture data to be ingested and send it to GCS (as final or temp yet to be determined)
     WriteFilesResult<Void> writtenFiles
             = dataToBeWritten
-                    .setCoder(coder)
                     .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
                             FileIO.<DataT>write()
                                     .via(sinkProvider.apply())
@@ -251,7 +269,7 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
                       .withDataOnWindowSignalsTag(dataOnWindowSignalsTag)
                       .withProcessedDataTag(processedDataTag)
                       .withFanoutShards(fanoutShards)
-                      .withWindowDuration(windowDuration)
+                      .withSuccessFileWindowDuration(successFileWindowDuration)
                       .withOutputDirectory(outputDirectory));
     }
 

@@ -168,35 +168,53 @@ public class PubsubToGCSParquet {
             .apply("ReadPubSubEvents",
                     PubsubIO.readMessages()
                             .fromSubscription(options.getInputSubscription()))
-            .apply(options.getWindowDuration() + "Window",
+            .apply(options.getFileWriteWindowDuration() + "Window",
                     Window.<PubsubMessage>into(
-                            FixedWindows.of(parseDuration(options.getWindowDuration())))
-                            .withAllowedLateness(parseDuration(options.getWindowDuration()).dividedBy(4L))
+                            FixedWindows.of(parseDuration(options.getFileWriteWindowDuration())))
+                            .withAllowedLateness(parseDuration(options.getFileWriteWindowDuration()).dividedBy(4L))
                             .discardingFiredPanes())
             .apply("ExtractGenericRecord",
                     ParDo.of(new PubsubMessageToArchiveDoFn(avroSchemaStr)))
             .setCoder(AvroCoder.of(avroSchema))
-            .apply("WriteParquetToGCS",
-                    WriteFormatToGCS.<GenericRecord>create()
-                            .withSinkProvider(
-                                    () -> ParquetIO
-                                            .sink(new Schema.Parser().parse(avroSchemaStr))
-                                            .withCompressionCodec(CompressionCodecName.SNAPPY))
-                            .withCoder(AvroCoder.of(avroSchema))
-                            .withComposeTempDirectory(options.getComposeTempDirectory())
-                            .withComposeSmallFiles(options.getComposeSmallFiles())
-                            .withCleanComposePartFiles(options.getCleanComposePartFiles())
-                            .withComposeShards(options.getComposeShards())
-                            .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
-                            .withNumShards(options.getNumShards())
-                            .withOutputDirectory(options.getOutputDirectory())
-                            .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
-                            .withOutputFilenameSuffix(options.getOutputFilenameSuffix())
-                            .withTempDirectory(options.getTempDirectory())
-                            .withWindowDuration(options.getWindowDuration()));
+            .apply("WriteParquetToGCS", createWriteFormatTransform(avroSchemaStr, options));
 
     // Execute the pipeline and return the result.
     return pipeline.run();
+  }
+
+  /**
+   * Creates a fully configured write format instance.
+   *
+   * @param avroSchemaStr the avro schema to write as a String
+   * @param options the pipeline options
+   * @return the write instance
+   */
+  static WriteFormatToGCS<GenericRecord> createWriteFormatTransform(String avroSchemaStr, PStoGCSParquetOptions options) {
+    WriteFormatToGCS<GenericRecord> write
+            = WriteFormatToGCS
+                    .<GenericRecord>create()
+                    .withSinkProvider(
+                            () -> ParquetIO
+                                    .sink(new Schema.Parser().parse(avroSchemaStr))
+                                    .withCompressionCodec(CompressionCodecName.SNAPPY))
+                    .withCoder(AvroCoder.of(new Schema.Parser().parse(avroSchemaStr)))
+                    .withComposeTempDirectory(options.getComposeTempDirectory())
+                    .withComposeSmallFiles(options.isComposeSmallFiles())
+                    .withCleanComposePartFiles(options.isCleanComposePartFiles())
+                    .withComposeShards(options.getComposeShards())
+                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
+                    .withNumShards(options.getNumShards())
+                    .withOutputDirectory(options.getOutputDirectory())
+                    .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
+                    .withOutputFilenameSuffix(options.getOutputFilenameSuffix())
+                    .withTempDirectory(options.getTempDirectory())
+                    .withHourlySuccessFiles(options.isHourlySuccessFiles());
+
+    if (!options.isHourlySuccessFiles()) {
+      write = write.withSuccessFilesWindowDuration(options.getFileWriteWindowDuration());
+    }
+
+    return write;
   }
 
   /**

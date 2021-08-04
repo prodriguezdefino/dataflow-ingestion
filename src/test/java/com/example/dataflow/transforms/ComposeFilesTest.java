@@ -15,7 +15,6 @@
  */
 package com.example.dataflow.transforms;
 
-import com.example.dataflow.PStoGCSParquetOptions;
 import com.example.dataflow.PubsubToGCSParquet;
 import java.io.File;
 import java.nio.file.Paths;
@@ -30,7 +29,6 @@ import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
-import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
@@ -51,7 +49,7 @@ import org.junit.rules.TemporaryFolder;
  */
 public class ComposeFilesTest {
 
-  private static final String SCHEMA_STRING
+  public static final String SCHEMA_STRING
           = "{"
           + "\"type\":\"record\", "
           + "\"name\":\"testrecord\","
@@ -60,19 +58,12 @@ public class ComposeFilesTest {
           + "    {\"name\":\"id\",\"type\":\"string\"}"
           + "  ]"
           + "}";
-  private static final Schema SCHEMA = new Schema.Parser().parse(SCHEMA_STRING);
-  private static final String[] SCIENTISTS
+  public static final Schema SCHEMA = new Schema.Parser().parse(SCHEMA_STRING);
+  public static final String[] SCIENTISTS
           = new String[]{
             "Einstein", "Darwin", "Copernicus", "Pasteur", "Curie",
             "Faraday", "Newton", "Bohr", "Galilei", "Maxwell"
           };
-
-  static final private PStoGCSParquetOptions options;
-
-  static {
-    options = PipelineOptionsFactory.as(PStoGCSParquetOptions.class);
-    options.setTempLocation("gs://discord-load-test-pabs/test-compose/");
-  }
 
   @Rule
   public transient TestPipeline mainPipeline = TestPipeline.create();
@@ -84,7 +75,7 @@ public class ComposeFilesTest {
   public ComposeFilesTest() {
   }
 
-  private List<GenericRecord> generateGenericRecords(long count) {
+  public static List<GenericRecord> generateGenericRecords(long count) {
     List<GenericRecord> data = new ArrayList<>();
     GenericRecordBuilder builder = new GenericRecordBuilder(SCHEMA);
     for (int i = 0; i < count; i++) {
