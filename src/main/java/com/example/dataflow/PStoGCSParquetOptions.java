@@ -72,9 +72,20 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
           + "Nm (for minutes, example: 12m), "
           + "Nh (for hours, example: 2h).")
   @Default.String("5m")
-  String getWindowDuration();
+  String getFileWriteWindowDuration();
 
-  void setWindowDuration(String value);
+  void setFileWriteWindowDuration(String value);
+
+  @Description(
+          "The window duration for the success files after writes. Defaults to 60m. "
+          + "Allowed formats are: "
+          + "Ns (for seconds, example: 5s), "
+          + "Nm (for minutes, example: 12m), "
+          + "Nh (for hours, example: 2h).")
+  @Default.String("60m")
+  String getSuccessFileWindowDuration();
+
+  void setSuccessFileWindowDuration(String value);
 
   @Description("The Parquet Write Temporary Directory. Must end with /")
   @Validation.Required
@@ -83,14 +94,14 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
   void setTempDirectory(ValueProvider<String> value);
 
   @Description("Creates a SUCCESS file once all data on a window has been received")
-  @Default.Boolean(true)
-  Boolean getCreateSuccessFile();
+  @Default.Boolean(false)
+  Boolean isSkipSuccessFile();
 
-  void setCreateSuccessFile(Boolean value);
+  void setSkipSuccessFile(Boolean value);
 
   @Description("Enables composition of multiple small files into bigger ones (Parquet support included in this pipeline)")
   @Default.Boolean(false)
-  Boolean getComposeSmallFiles();
+  Boolean isComposeSmallFiles();
 
   void setComposeSmallFiles(Boolean value);
 
@@ -102,9 +113,15 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
 
   @Description("Cleans all files part after composing them (Parquet support included in this pipeline)")
   @Default.Boolean(true)
-  Boolean getCleanComposePartFiles();
+  Boolean isCleanComposePartFiles();
 
   void setCleanComposePartFiles(Boolean value);
+
+  @Description("Creates SUCCESS files on hourly basis")
+  @Default.Boolean(false)
+  Boolean isHourlySuccessFiles();
+
+  void setHourlySuccessFiles(Boolean value);
 
   @Description("Local path to the AVRO schema to use.")
   @Validation.Required

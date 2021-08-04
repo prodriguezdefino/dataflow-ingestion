@@ -23,6 +23,7 @@ import org.joda.time.Duration;
 import org.joda.time.MutablePeriod;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
 import org.joda.time.format.PeriodFormatterBuilder;
 import org.joda.time.format.PeriodParser;
 
@@ -31,20 +32,51 @@ import org.joda.time.format.PeriodParser;
  */
 public class Utilities {
 
-  private static final String OUTPUT_PATH_WINDOW = "YYYY/MM/DD/HH/mm/";
+  private static final String OUTPUT_PATH_MINUTE_WINDOW = "YYYY/MM/DD/HH/mm/";
+  private static final String OUTPUT_PATH_HOURLY_WINDOW = "YYYY/MM/DD/HH/";
+  private static final DateTimeFormatter OUTPUT_HOURLY_WINDOW_FILENAME_COMPONENT = ISODateTimeFormat.basicDateTime();
   private static final DateTimeFormatter YEAR = DateTimeFormat.forPattern("YYYY");
   private static final DateTimeFormatter MONTH = DateTimeFormat.forPattern("MM");
   private static final DateTimeFormatter DAY = DateTimeFormat.forPattern("dd");
   private static final DateTimeFormatter HOUR = DateTimeFormat.forPattern("HH");
   private static final DateTimeFormatter MINUTE = DateTimeFormat.forPattern("mm");
 
+  /**
+   *
+   * @param time
+   * @return
+   */
   public static String buildPartitionedPathFromDatetime(DateTime time) {
-    return OUTPUT_PATH_WINDOW
+    return OUTPUT_PATH_MINUTE_WINDOW
             .replace("YYYY", YEAR.print(time))
             .replace("MM", MONTH.print(time))
             .replace("DD", DAY.print(time))
             .replace("HH", HOUR.print(time))
             .replace("mm", MINUTE.print(time));
+  }
+
+  /**
+   *
+   * @param time
+   * @return
+   */
+  public static String buildHourlyPartitionedPathFromDatetime(DateTime time) {
+    return OUTPUT_PATH_HOURLY_WINDOW
+            .replace("YYYY", YEAR.print(time))
+            .replace("MM", MONTH.print(time))
+            .replace("DD", DAY.print(time))
+            .replace("HH", HOUR.print(time))
+            .replace("mm", MINUTE.print(time));
+  }
+
+  /**
+   * Formats the provided time to the format expected for the window component of the filename.
+   *
+   * @param time
+   * @return
+   */
+  public static String formatFilenameWindowComponent(DateTime time) {
+    return "w" + time.toString(OUTPUT_HOURLY_WINDOW_FILENAME_COMPONENT);
   }
 
   /**

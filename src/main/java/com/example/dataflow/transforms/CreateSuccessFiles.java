@@ -19,16 +19,14 @@ import static com.example.dataflow.utils.Utilities.buildPartitionedPathFromDatet
 import static com.example.dataflow.utils.Utilities.parseDuration;
 import static com.google.common.base.Preconditions.checkArgument;
 import java.io.IOException;
+import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Combine;
@@ -84,7 +82,7 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     return this;
   }
 
-  public CreateSuccessFiles withWindowDuration(String windowDuration) {
+  public CreateSuccessFiles withSuccessFileWindowDuration(String windowDuration) {
     this.windowDuration = windowDuration;
     return this;
   }
@@ -140,7 +138,8 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
             .get(processedData)
             .apply("WriteSuccessFile",
                     CreateSuccessFile.create()
-                            .withFanoutShards(fanoutShards));
+                            .withFanoutShards(fanoutShards)
+                            .withWindowDuration(windowDuration));
 
     return PDone.in(input.getPipeline());
   }
@@ -152,6 +151,7 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
   static class CreateSuccessFile extends PTransform<PCollection<String>, PCollection<Void>> {
 
     private Integer fanoutShards = 10;
+    private String windowDuration;
 
     public CreateSuccessFile() {
     }
@@ -165,54 +165,80 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
       return this;
     }
 
+    public CreateSuccessFile withWindowDuration(String windowDuration) {
+      this.windowDuration = windowDuration;
+      return this;
+    }
+
     @Override
     public PCollection<Void> expand(PCollection<String> input) {
-
       return input
               // wait for all the files in the current window
+              .apply("With" + windowDuration + "Window",
+                      Window.<String>into(
+                              FixedWindows.of(parseDuration(windowDuration)))
+                              .withAllowedLateness(parseDuration(windowDuration).dividedBy(4L))
+                              .discardingFiredPanes())
               .apply("CombineFilesInWindow",
-                      Combine.globally(CombineFilesNamesInList.create())
+                      Combine.globally(CombineFilesNames.create())
                               .withFanout(fanoutShards)
                               .withoutDefaults())
               .apply("CreateSuccessFile", ParDo.of(new SuccessFileWriteDoFn()));
     }
 
     /**
-     * Combine Strings into a list that will be used for composition on bigger files.
+     * Combine Strings keeping the latest filename (ordered lexicographically) as the result to be returned.
      */
-    static class CombineFilesNamesInList extends Combine.CombineFn<String, List<String>, Iterable<String>> {
+    static class CombineFilesNames extends Combine.CombineFn<String, CombineFilesNames.FilenameAcc, String> {
 
-      public static CombineFilesNamesInList create() {
-        return new CombineFilesNamesInList();
+      static class FilenameAcc implements Serializable {
+
+        private String filename;
+
+        public void add(String anotherFileName) {
+          if (anotherFileName == null) {
+            return;
+          } else if (filename == null) {
+            filename = anotherFileName;
+          } else if (filename.compareTo(anotherFileName) > 0) {
+            filename = anotherFileName;
+          }
+        }
+
+        public void merge(FilenameAcc accu) {
+          this.add(accu.filename);
+        }
+
+      }
+
+      public static CombineFilesNames create() {
+        return new CombineFilesNames();
       }
 
       @Override
-      public List<String> createAccumulator() {
-        return new ArrayList<>();
+      public CombineFilesNames.FilenameAcc createAccumulator() {
+        return new FilenameAcc();
       }
 
       @Override
-      public List<String> addInput(List<String> mutableAccumulator, String input) {
+      public CombineFilesNames.FilenameAcc addInput(CombineFilesNames.FilenameAcc mutableAccumulator, String input) {
         mutableAccumulator.add(input);
         return mutableAccumulator;
       }
 
       @Override
-      public List<String> mergeAccumulators(Iterable<List<String>> accumulators) {
-        List<String> newAccum = createAccumulator();
-        for (List<String> accum : accumulators) {
-          newAccum.addAll(accum);
+      public CombineFilesNames.FilenameAcc mergeAccumulators(Iterable<CombineFilesNames.FilenameAcc> accumulators) {
+        CombineFilesNames.FilenameAcc newAccum = createAccumulator();
+        for (CombineFilesNames.FilenameAcc accum : accumulators) {
+          newAccum.merge(accum);
         }
         return newAccum;
       }
 
       @Override
-      public List<String> extractOutput(List<String> accumulator) {
+      public String extractOutput(CombineFilesNames.FilenameAcc accumulator) {
         // return a consistent representation of a file list to avoid duplications when retries happens
-        return accumulator
-                .stream()
-                .sorted()
-                .collect(Collectors.toList());
+        return accumulator.filename;
       }
     }
 
@@ -220,18 +246,12 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
      * Creates a SUCCESS file on the folder location of the first file in the received iterable (assumes all the files are contained in the
      * same folder).
      */
-    static class SuccessFileWriteDoFn extends DoFn<Iterable<String>, Void> {
+    static class SuccessFileWriteDoFn extends DoFn<String, Void> {
 
       @ProcessElement
       public void processElement(ProcessContext context) throws IOException {
-        List<String> files = StreamSupport
-                .stream(context.element().spliterator(), false)
-                .collect(Collectors.toList());
-
-        if (files.size() > 0) {
-          createSuccessFileInPath(files.get(0), false);
-          context.output((Void) null);
-        }
+        createSuccessFileInPath(context.element(), false);
+        context.output((Void) null);
       }
     }
 
@@ -279,27 +299,30 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public PDone expand(PCollection<Boolean> input) {
+      Window<Boolean> window
+              = Window
+                      .<Boolean>into(FixedWindows.of(parseDuration(windowDuration)))
+                      .withAllowedLateness(parseDuration(windowDuration).dividedBy(4L))
+                      .discardingFiredPanes();
 
       // create a dummy signal on periodic intervals using same window definition
       PCollection<Boolean> periodicSignals = input.getPipeline()
               .apply("ImpulseEvery" + windowDuration,
                       GenerateSequence.from(0l).withRate(1, parseDuration(windowDuration)))
-              .apply(windowDuration + "Window",
-                      Window.<Long>into(FixedWindows.of(parseDuration(windowDuration)))
-                              .withAllowedLateness(parseDuration(windowDuration).dividedBy(4L))
-                              .discardingFiredPanes())
-              .apply("CreateDummySignal", MapElements.into(TypeDescriptors.booleans()).via(ts -> true));
+              .apply("CreateDummySignal", MapElements.into(TypeDescriptors.booleans()).via(ts -> true))
+              .apply(windowDuration + "Window", window);
 
       // flatten elements with the input branch (main data)
       PCollectionList
               .of(periodicSignals)
-              .and(input)
+              .and(input.apply("Window" + windowDuration, window))
               .apply("FlattenSignals", Flatten.pCollections())
               .apply("CountOnWindow",
                       Combine.globally(Count.<Boolean>combineFn())
-                              .withoutDefaults()
-                              .withFanout(fanoutShards))
+                              .withFanout(fanoutShards)
+                              .withoutDefaults())
               .apply("CheckDummySignal", ParDo.of(new CheckDataSignalOnWindowDoFn(outputDirectory)));
       return PDone.in(input.getPipeline());
     }

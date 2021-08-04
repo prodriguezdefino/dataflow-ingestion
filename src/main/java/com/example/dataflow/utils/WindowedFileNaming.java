@@ -15,13 +15,12 @@
  */
 package com.example.dataflow.utils;
 
+import java.util.Optional;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +34,7 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
   private final ValueProvider<String> filePrefix;
   private final ValueProvider<String> fileSuffix;
   private final String exec;
+  private Boolean includeMinutesInPath = true;
 
   public WindowedFileNaming(ValueProvider<String> filePrefix, ValueProvider<String> fileSuffix, String exec) {
     this.filePrefix = filePrefix;
@@ -42,20 +42,36 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
     this.exec = exec;
   }
 
+  public WindowedFileNaming withHourlyPaths() {
+    this.includeMinutesInPath = false;
+    return this;
+  }
+
+  public WindowedFileNaming cloneWithHourlyPaths() {
+    WindowedFileNaming naming = new WindowedFileNaming(this.filePrefix, this.fileSuffix, this.exec);
+    naming.includeMinutesInPath = false;
+    return naming;
+  }
+
   @Override
   public String getFilename(BoundedWindow window, PaneInfo pane, int numShards, int shardIndex, Compression compression) {
-    String outputPath = "";
-
-    if (window instanceof IntervalWindow) {
-      IntervalWindow intervalWindow = (IntervalWindow) window;
-      DateTime time = intervalWindow.end().toDateTime();
-      outputPath = Utilities.buildPartitionedPathFromDatetime(time);
-    }
+    String outputPath
+            = Optional
+                    .ofNullable(window)
+                    .map(w -> w.maxTimestamp().toDateTime())
+                    .map(time -> includeMinutesInPath
+                    ? Utilities.buildPartitionedPathFromDatetime(time)
+                    : Utilities.buildHourlyPartitionedPathFromDatetime(time))
+                    .orElse("");
 
     StringBuilder fileNameSB = new StringBuilder(outputPath);
 
     if (!filePrefix.get().isEmpty()) {
       fileNameSB.append(filePrefix.get());
+    }
+
+    if (!includeMinutesInPath && window != null) {
+      fileNameSB.append("-").append(Utilities.formatFilenameWindowComponent(window.maxTimestamp().toDateTime()));
     }
 
     fileNameSB.append("-pane-").append(pane.getIndex())
