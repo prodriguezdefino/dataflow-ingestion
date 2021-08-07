@@ -21,11 +21,11 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.example.dataflow</groupId>
-  <artifactId>ps-to-bq</artifactId>
+  <artifactId>dataflow-ingestion-ps-to-bq</artifactId>
   
   <parent>
     <groupId>com.example.dataflow</groupId>
-    <artifactId>dataflow-pubsub-ingestion</artifactId>
+    <artifactId>dataflow-ingestion</artifactId>
     <version>0.0.1</version>
     <relativePath>..</relativePath>
   </parent>

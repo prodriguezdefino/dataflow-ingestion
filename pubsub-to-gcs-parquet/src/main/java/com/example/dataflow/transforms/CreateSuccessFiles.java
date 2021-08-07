@@ -17,6 +17,7 @@ package com.example.dataflow.transforms;
 
 import static com.example.dataflow.utils.Utilities.buildPartitionedPathFromDatetime;
 import static com.example.dataflow.utils.Utilities.parseDuration;
+import com.google.common.annotations.VisibleForTesting;
 import static com.google.common.base.Preconditions.checkArgument;
 import java.io.IOException;
 import java.io.Serializable;
@@ -66,11 +67,19 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
   private Integer fanoutShards = 10;
   private String windowDuration;
   private ValueProvider<String> outputDirectory;
+  private Boolean testingSeq = false;
 
   public CreateSuccessFiles withProcessedDataTag(TupleTag<String> processedData) {
     this.processedData = processedData;
     return this;
   }
+
+  @VisibleForTesting
+  CreateSuccessFiles withTestingSeq() {
+    this.testingSeq = true;
+    return this;
+  }
+  
 
   public CreateSuccessFiles withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
     this.dataOnWindowSignals = dataOnWindowSignals;
@@ -123,15 +132,20 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
       throw new IllegalArgumentException("Writes to GCS expects 2 tuple tags on PCollection (data to ingest and signals on windows).");
     }
 
+    WriteSuccessFileOnEmptyWindow writeOnEmpty = WriteSuccessFileOnEmptyWindow.create()
+            .withOutputDirectory(outputDirectory)
+            .withFanoutShards(fanoutShards)
+            .withWindowDuration(windowDuration);
+
+    if (testingSeq) {
+      writeOnEmpty = writeOnEmpty.withTestingSeq();
+    }
+
     // Process an empty window, in case no data is coming from pubsub
     input
             .get(dataOnWindowSignals)
             // create a SUCCESS file if the window is empty
-            .apply("ProcessEmptyWindows",
-                    WriteSuccessFileOnEmptyWindow.create()
-                            .withOutputDirectory(outputDirectory)
-                            .withFanoutShards(fanoutShards)
-                            .withWindowDuration(windowDuration));
+            .apply("ProcessEmptyWindows", writeOnEmpty);
 
     // also, process the PCollection with info of files that were writen to destination
     input
@@ -266,6 +280,7 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
     private String windowDuration;
     private Integer fanoutShards = 10;
+    private Boolean testingSeq = false;
     private ValueProvider<String> outputDirectory;
 
     private WriteSuccessFileOnEmptyWindow() {
@@ -290,6 +305,12 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
       return this;
     }
 
+    @VisibleForTesting
+    public WriteSuccessFileOnEmptyWindow withTestingSeq() {
+      this.testingSeq = true;
+      return this;
+    }
+
     @Override
     public void validate(PipelineOptions options) {
       super.validate(options);
@@ -307,10 +328,18 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
                       .withAllowedLateness(parseDuration(windowDuration).dividedBy(4L))
                       .discardingFiredPanes();
 
+      GenerateSequence seq = GenerateSequence
+              .from(0l)
+              .withRate(1, parseDuration(windowDuration));
+
+      // when testing we only want one impulse to be generated.
+      if (testingSeq) {
+        seq = seq.to(1L);
+      }
+
       // create a dummy signal on periodic intervals using same window definition
       PCollection<Boolean> periodicSignals = input.getPipeline()
-              .apply("ImpulseEvery" + windowDuration,
-                      GenerateSequence.from(0l).withRate(1, parseDuration(windowDuration)))
+              .apply("ImpulseEvery" + windowDuration, seq)
               .apply("CreateDummySignal", MapElements.into(TypeDescriptors.booleans()).via(ts -> true))
               .apply(windowDuration + "Window", window);
 

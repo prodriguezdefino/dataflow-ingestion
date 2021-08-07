@@ -17,6 +17,7 @@ package com.example.dataflow.transforms;
 
 import com.example.dataflow.utils.Functions.*;
 import com.example.dataflow.utils.WindowedFileNaming;
+import com.google.common.annotations.VisibleForTesting;
 import static com.google.common.base.Preconditions.checkArgument;
 import java.io.IOException;
 import org.apache.beam.sdk.coders.Coder;
@@ -60,8 +61,15 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
   private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
   private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
   private Coder<DataT> coder;
+  private Boolean testingSeq = false;
 
   private WriteFormatToGCS() {
+  }
+
+  @VisibleForTesting
+  WriteFormatToGCS<DataT> withTestingSeq() {
+    this.testingSeq = true;
+    return this;
   }
 
   public WriteFormatToGCS<DataT> withOutputFilenamePrefix(ValueProvider<String> outputFilenamePrefix) {
@@ -278,14 +286,20 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
                       .of(processedDataTag, fileNames)
                       .and(dataOnWindowSignalsTag, dataOnWindowSignals);
 
-      // Create SUCCESS files for empty of populated windows.
-      createSuccessFileInputData.apply("CreateSuccessFiles",
-              CreateSuccessFiles.create()
+      CreateSuccessFiles createSuccessFiles
+              = CreateSuccessFiles.create()
                       .withDataOnWindowSignalsTag(dataOnWindowSignalsTag)
                       .withProcessedDataTag(processedDataTag)
                       .withFanoutShards(fanoutShards)
                       .withSuccessFileWindowDuration(successFileWindowDuration)
-                      .withOutputDirectory(outputDirectory));
+                      .withOutputDirectory(outputDirectory);
+
+      if (testingSeq) {
+        createSuccessFiles = createSuccessFiles.withTestingSeq();
+      }
+
+      // Create SUCCESS files for empty of populated windows.
+      createSuccessFileInputData.apply("CreateSuccessFiles", createSuccessFiles);
     }
 
     return PDone.in(input.getPipeline());
@@ -296,6 +310,11 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
     private final TupleTag<Boolean> dataOnWindowSignals;
     private final TupleTag<DataT> dataToBeProcessed;
     private Long countPerBundle = 0L;
+
+    public static <DataT> TupleTag<DataT> createDataToBeProcessedTag() {
+      return new TupleTag<DataT>() {
+      };
+    }
 
     public CaptureDataOnWindowSignals(TupleTag<Boolean> dataOnWindowSignals, TupleTag<DataT> dataToBeProcessed) {
       this.dataOnWindowSignals = dataOnWindowSignals;
