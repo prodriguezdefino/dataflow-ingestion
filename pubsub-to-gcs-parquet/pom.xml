@@ -59,7 +59,7 @@
     
     <dependency>
       <groupId>com.example.dataflow</groupId>
-      <artifactId>common</artifactId>
+      <artifactId>dataflow-ingestion-common</artifactId>
       <version>${project.version}</version>
     </dependency>
 
