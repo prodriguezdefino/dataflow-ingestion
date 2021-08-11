@@ -94,4 +94,4 @@ public class WriteFormatToGCSTest {
     // there are more files with data
     Assert.assertTrue(resourceList.size() > 1);
   }
-};
+}

@@ -15,6 +15,7 @@
  */
 package com.example.dataflow.transforms;
 
+import static com.example.dataflow.utils.Utilities.buildHourlyPartitionedPathFromDatetime;
 import static com.example.dataflow.utils.Utilities.buildPartitionedPathFromDatetime;
 import static com.example.dataflow.utils.Utilities.parseDuration;
 import com.google.common.annotations.VisibleForTesting;
@@ -27,7 +28,6 @@ import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
-import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Combine;
@@ -50,13 +50,14 @@ import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.joda.time.DateTime;
+import org.joda.time.Hours;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Creates SUCCESS files based on the data contained in 2 tuples of the PCollectionTuple: data that has been processed (processedData) and
- * signals of data found in a window (dataOnWindowSignals).
+ * Creates SUCCESS files based on the data contained in 2 tuples of the PCollectionTuple: data that has been processed on a particular
+ * window (processedData) and signals of data found in the same window (dataOnWindowSignals).
  */
 public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
@@ -79,7 +80,6 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     this.testingSeq = true;
     return this;
   }
-  
 
   public CreateSuccessFiles withDataOnWindowSignalsTag(TupleTag<Boolean> dataOnWindowSignals) {
     this.dataOnWindowSignals = dataOnWindowSignals;
@@ -380,7 +380,12 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
           if (window instanceof IntervalWindow) {
             IntervalWindow intervalWindow = (IntervalWindow) window;
             DateTime time = intervalWindow.end().toDateTime();
-            outputPath = outputPath + buildPartitionedPathFromDatetime(time);
+            // check for hourly windows 
+            if (Hours.hoursBetween(intervalWindow.start(), intervalWindow.end()).getHours() == 1) {
+              outputPath = outputPath + buildHourlyPartitionedPathFromDatetime(time);
+            } else {
+              outputPath = outputPath + buildPartitionedPathFromDatetime(time);
+            }
           } else {
             outputPath = outputPath + buildPartitionedPathFromDatetime(Instant.now().toDateTime());
           }
