@@ -15,7 +15,7 @@
  */
 package com.example.dataflow;
 
-import com.example.dataflow.transforms.WriteFormatToGCS;
+import com.example.dataflow.transforms.WriteFormatToFileDestination;
 import static com.example.dataflow.utils.Utilities.parseDuration;
 import java.io.IOException;
 import java.nio.channels.Channels;
@@ -189,9 +189,9 @@ public class PubsubToGCSParquet {
    * @param options the pipeline options
    * @return the write instance
    */
-  static WriteFormatToGCS<GenericRecord> createWriteFormatTransform(String avroSchemaStr, PStoGCSParquetOptions options) {
-    WriteFormatToGCS<GenericRecord> write
-            = WriteFormatToGCS
+  static WriteFormatToFileDestination<GenericRecord> createWriteFormatTransform(String avroSchemaStr, PStoGCSParquetOptions options) {
+    WriteFormatToFileDestination<GenericRecord> write
+            = WriteFormatToFileDestination
                     .<GenericRecord>create()
                     .withSinkProvider(
                             () -> ParquetIO

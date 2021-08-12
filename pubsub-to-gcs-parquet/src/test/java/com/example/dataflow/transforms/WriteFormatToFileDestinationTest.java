@@ -27,7 +27,7 @@ import org.junit.rules.TemporaryFolder;
 /**
  *
  */
-public class WriteFormatToGCSTest {
+public class WriteFormatToFileDestinationTest {
 
   @Rule
   public transient TestPipeline testPipeline = TestPipeline.create();
@@ -61,7 +61,7 @@ public class WriteFormatToGCSTest {
                     .<GenericRecord>into(FixedWindows.of(Utilities.parseDuration("1m")))
                     .discardingFiredPanes())
             .apply("WriteParquetToGCS",
-                    WriteFormatToGCS.<GenericRecord>create()
+                    WriteFormatToFileDestination.<GenericRecord>create()
                             .withSinkProvider(
                                     () -> ParquetIO
                                             .sink(new Schema.Parser().parse(ComposeFilesTest.SCHEMA_STRING))

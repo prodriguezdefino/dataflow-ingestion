@@ -62,7 +62,7 @@ public class CreateSuccessFileTest {
           String outputPath,
           String successFileWindowDuration) {
     TupleTag<Boolean> dataOnWindowSignalsTag = CreateSuccessFiles.dataOnWindowSignalTag();
-    TupleTag<GenericRecord> dataToBeIngestedTag = WriteFormatToGCS.CaptureDataOnWindowSignals
+    TupleTag<GenericRecord> dataToBeIngestedTag = WriteFormatToFileDestination.CaptureDataOnWindowSignals
             .<GenericRecord>createDataToBeProcessedTag();
 
     testPipeline.getCoderRegistry().registerCoderForType(TypeDescriptor.of(GenericRecord.class), coder);
@@ -74,7 +74,7 @@ public class CreateSuccessFileTest {
                     .discardingFiredPanes())
             .apply(ParDo
                     .of(
-                            new WriteFormatToGCS.CaptureDataOnWindowSignals<>(
+                            new WriteFormatToFileDestination.CaptureDataOnWindowSignals<>(
                                     dataOnWindowSignalsTag,
                                     dataToBeIngestedTag))
                     .withOutputTags(dataToBeIngestedTag, TupleTagList.of(dataOnWindowSignalsTag)));

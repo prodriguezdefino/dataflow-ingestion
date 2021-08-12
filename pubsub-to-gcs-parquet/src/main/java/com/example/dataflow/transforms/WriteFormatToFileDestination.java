@@ -43,7 +43,7 @@ import org.apache.commons.lang.RandomStringUtils;
  *
  * @param <DataT> The data type for the ingestion format.
  */
-public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDone> {
+public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<DataT>, PDone> {
 
   private ValueProvider<String> outputFilenamePrefix;
   private ValueProvider<String> outputFilenameSuffix;
@@ -63,46 +63,46 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
   private Coder<DataT> coder;
   private Boolean testingSeq = false;
 
-  private WriteFormatToGCS() {
+  private WriteFormatToFileDestination() {
   }
 
   @VisibleForTesting
-  WriteFormatToGCS<DataT> withTestingSeq() {
+  WriteFormatToFileDestination<DataT> withTestingSeq() {
     this.testingSeq = true;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withOutputFilenamePrefix(ValueProvider<String> outputFilenamePrefix) {
+  public WriteFormatToFileDestination<DataT> withOutputFilenamePrefix(ValueProvider<String> outputFilenamePrefix) {
     this.outputFilenamePrefix = outputFilenamePrefix;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withOutputFilenameSuffix(ValueProvider<String> outputFilenameSuffix) {
+  public WriteFormatToFileDestination<DataT> withOutputFilenameSuffix(ValueProvider<String> outputFilenameSuffix) {
     this.outputFilenameSuffix = outputFilenameSuffix;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withTempDirectory(ValueProvider<String> tempDirectory) {
+  public WriteFormatToFileDestination<DataT> withTempDirectory(ValueProvider<String> tempDirectory) {
     this.tempDirectory = tempDirectory;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
+  public WriteFormatToFileDestination<DataT> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
     this.composeTempDirectory = composeTempDirectory;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withOutputDirectory(ValueProvider<String> outputDirectory) {
+  public WriteFormatToFileDestination<DataT> withOutputDirectory(ValueProvider<String> outputDirectory) {
     this.outputDirectory = outputDirectory;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withSuccessFilesWindowDuration(String duration) {
+  public WriteFormatToFileDestination<DataT> withSuccessFilesWindowDuration(String duration) {
     this.successFileWindowDuration = duration;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withHourlySuccessFiles(Boolean value) {
+  public WriteFormatToFileDestination<DataT> withHourlySuccessFiles(Boolean value) {
     this.hourlySuccessFiles = value;
     if (value) {
       this.successFileWindowDuration = "60m";
@@ -110,53 +110,53 @@ public class WriteFormatToGCS<DataT> extends PTransform<PCollection<DataT>, PDon
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withNumShards(Integer numShards) {
+  public WriteFormatToFileDestination<DataT> withNumShards(Integer numShards) {
     this.numShards = numShards;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withComposeShards(Integer composeShards) {
+  public WriteFormatToFileDestination<DataT> withComposeShards(Integer composeShards) {
     this.composeShards = composeShards;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withFanoutShards(Integer fanoutShards) {
+  public WriteFormatToFileDestination<DataT> withFanoutShards(Integer fanoutShards) {
     this.fanoutShards = fanoutShards;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
+  public WriteFormatToFileDestination<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
     this.composeSmallFiles = composeSmallFiles;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
+  public WriteFormatToFileDestination<DataT> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
     this.cleanComposePartFiles = cleanComposePartFiles;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withCreateSuccessFile(Boolean createSuccessFile) {
+  public WriteFormatToFileDestination<DataT> withCreateSuccessFile(Boolean createSuccessFile) {
     this.createSuccessFile = createSuccessFile;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
+  public WriteFormatToFileDestination<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
     this.sinkProvider = sinkProvider;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+  public WriteFormatToFileDestination<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
     this.composeFunction = composeFunction;
     return this;
   }
 
-  public WriteFormatToGCS<DataT> withCoder(Coder<DataT> coder) {
+  public WriteFormatToFileDestination<DataT> withCoder(Coder<DataT> coder) {
     this.coder = coder;
     return this;
   }
 
-  public static <DataT> WriteFormatToGCS<DataT> create() {
-    return new WriteFormatToGCS<>();
+  public static <DataT> WriteFormatToFileDestination<DataT> create() {
+    return new WriteFormatToFileDestination<>();
   }
 
   public static <DataT> TupleTag<DataT> dataToIngestTag() {
