@@ -63,4 +63,10 @@ public interface PStoBQOptions extends DataflowPipelineOptions {
   Boolean isIncludeInsertTimestamp();
 
   void setIncludeInsertTimestamp(Boolean value);
+  
+  @Description("Inserts data using BQ batch loads.")
+  @Default.Boolean(false)
+  Boolean isBatchUpload();
+
+  void setBatchUpload(Boolean value);
 }

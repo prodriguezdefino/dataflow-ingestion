@@ -28,6 +28,9 @@ import com.google.cloud.bigquery.StandardSQLTypeName;
 import com.google.cloud.bigquery.StandardTableDefinition;
 import com.google.cloud.bigquery.Table;
 import com.google.cloud.bigquery.TableId;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -37,16 +40,24 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.apache.avro.JsonProperties;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
+import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.io.BinaryDecoder;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.io.EncoderFactory;
 import org.apache.avro.io.JsonDecoder;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.AvroGenericCoder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -67,7 +78,10 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
+import org.joda.time.DateTime;
+import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -159,7 +173,7 @@ public class PubsubToBigQuery {
    * @return The result of the pipeline execution.
    */
   static PipelineResult run(PStoBQOptions options) throws IOException {
-    
+
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
 
@@ -192,7 +206,6 @@ public class PubsubToBigQuery {
                 .set(BQ_INSERT_TIMESTAMP_FIELDNAME, "AUTO");
         return tableRow;
       };
-
     }
 
     /*
@@ -203,73 +216,172 @@ public class PubsubToBigQuery {
      *   4) If configured, add an insert timestamp into the BQ table
      *   5) If configured, when the column does not exists, update the BQ table schema to add the column
      */
-    WriteResult bqWriteResults = pipeline
+    PCollection<GenericRecord> records = pipeline
             .apply("ReadPubSubEvents",
                     PubsubIO.readMessages()
                             .fromSubscription(options.getInputSubscription()))
             .apply("ExtractGenericRecord",
                     ParDo.of(new PubsubMessageToArchiveDoFn(avroSchemaStr)))
-            .setCoder(AvroCoder.of(avroSchema))
-            .apply("WriteToBQ",
-                    BigQueryIO.<GenericRecord>write()
-                            .skipInvalidRows()
-                            .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                            .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                            .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                            .to(options.getOutputTableSpec())
-                            .withSchema(bqSchema)
-                            .withFormatFunction(bqFormatFunction)
-                            .withExtendedErrorInfo()
-                            .withAutoSharding()
-                            .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+            .setCoder(AvroCoder.of(avroSchema));
 
-    WriteResult errorFixResults = bqWriteResults
-            .getFailedInsertsWithErr()
-            .apply(options.getInsertErrorWindowDuration() + "Window",
-                    Window.<BigQueryInsertError>into(
-                            FixedWindows.of(parseDuration(options.getInsertErrorWindowDuration())))
-                            .withAllowedLateness(parseDuration(options.getInsertErrorWindowDuration()).dividedBy(4L))
-                            .discardingFiredPanes())
-            .apply("ChannelErrors", ParDo.of(new ChannelSchemaErrors()))
-            .setCoder(KvCoder.of(TableReferenceCoder.of(), TableRowJsonCoder.of()))
-            .apply("GroupByErrorType", GroupByKey.create())
-            .apply("ResolveError", ParDo.of(new FixSchemaErrors()))
-            .apply("TryAgainWriteToBQ",
-                    BigQueryIO.writeTableRows()
-                            .skipInvalidRows()
-                            .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                            .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                            .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                            .to(options.getOutputTableSpec())
-                            .withSchema(bqSchema)
-                            .withExtendedErrorInfo()
-                            .withAutoSharding()
-                            .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+    if (options.isBatchUpload()) {
+      Schema timestampedSchema = addNullableTimestampFieldToAvroSchema(avroSchema, BQ_INSERT_TIMESTAMP_FIELDNAME);
+      String timestampedSchemaStr = timestampedSchema.toString();
+      records
+              .apply("AddTSToRecord", ParDo.of(new AddInsertTimestampToGenericRecord(timestampedSchemaStr)))
+              .setCoder(AvroGenericCoder.of(timestampedSchema))
+              .apply("WriteToBQ",
+                      BigQueryIO.<GenericRecord>write()
+                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+                              .withSchemaUpdateOptions(
+                                      Sets.newHashSet(
+                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
+                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_RELAXATION))
+                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+                              .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+                              .to(options.getOutputTableSpec())
+                              // bq schema based on the new avro schema
+                              .withSchema(BigQueryUtils.toTableSchema(AvroUtils.toBeamSchema(new Schema.Parser().parse(timestampedSchemaStr))))
+                              // new avro schema, string format because is not serializable
+                              .withAvroSchemaFactory(bqschema -> new Schema.Parser().parse(timestampedSchemaStr))
+                              // simple writer configuration, not much to do
+                              .withAvroWriter(
+                                      avroWriteRequest -> avroWriteRequest.getElement(),
+                                      schema -> new GenericDatumWriter<>(schema))
+                              .withTriggeringFrequency(Duration.standardMinutes(5L))
+                              .withNumFileShards(10));
 
-    errorFixResults
-            .getFailedInsertsWithErr()
-            .apply("WriteToErrorTable",
-                    BigQueryIO.<BigQueryInsertError>write()
-                            .skipInvalidRows()
-                            .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                            .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                            .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                            .to(options.getOutputTableSpec() + "-errors")
-                            .withSchema(new TableSchema()
-                                    .setFields(
-                                            Arrays.asList(
-                                                    new TableFieldSchema().setName("error_message").setType("STRING"),
-                                                    new TableFieldSchema().setName("failed_row").setType("STRING"))))
-                            .withFormatFunction(bqError
-                                    -> new TableRow()
-                                    .set("error_message", bqError.getError().toString())
-                                    .set("failed_row", bqError.getRow()))
-                            .withExtendedErrorInfo()
-                            .withAutoSharding()
-                            .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
-            );
+    } else {
+      WriteResult bqWriteResults
+              = records
+                      .apply("WriteToBQ",
+                              BigQueryIO.<GenericRecord>write()
+                                      .skipInvalidRows()
+                                      .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+                                      .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                                      .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+                                      .to(options.getOutputTableSpec())
+                                      .withSchema(bqSchema)
+                                      .withFormatFunction(bqFormatFunction)
+                                      .withExtendedErrorInfo()
+                                      .withAutoSharding()
+                                      .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+
+      WriteResult errorFixResults = bqWriteResults
+              .getFailedInsertsWithErr()
+              .apply(options.getInsertErrorWindowDuration() + "Window",
+                      Window.<BigQueryInsertError>into(
+                              FixedWindows.of(parseDuration(options.getInsertErrorWindowDuration())))
+                              .withAllowedLateness(parseDuration(options.getInsertErrorWindowDuration()).dividedBy(4L))
+                              .discardingFiredPanes())
+              .apply("ChannelErrors", ParDo.of(new ChannelSchemaErrors()))
+              .setCoder(KvCoder.of(TableReferenceCoder.of(), TableRowJsonCoder.of()))
+              .apply("GroupByErrorType", GroupByKey.create())
+              .apply("ResolveError", ParDo.of(new FixSchemaErrors()))
+              .apply("TryAgainWriteToBQ",
+                      BigQueryIO.writeTableRows()
+                              .skipInvalidRows()
+                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+                              .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+                              .to(options.getOutputTableSpec())
+                              .withSchema(bqSchema)
+                              .withExtendedErrorInfo()
+                              .withAutoSharding()
+                              .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+
+      errorFixResults
+              .getFailedInsertsWithErr()
+              .apply("WriteToErrorTable",
+                      BigQueryIO.<BigQueryInsertError>write()
+                              .skipInvalidRows()
+                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+                              .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+                              .to(options.getOutputTableSpec() + "-errors")
+                              .withSchema(new TableSchema()
+                                      .setFields(
+                                              Arrays.asList(
+                                                      new TableFieldSchema().setName("error_message").setType("STRING"),
+                                                      new TableFieldSchema().setName("failed_row").setType("STRING"))))
+                              .withFormatFunction(bqError
+                                      -> new TableRow()
+                                      .set("error_message", bqError.getError().toString())
+                                      .set("failed_row", bqError.getRow()))
+                              .withExtendedErrorInfo()
+                              .withAutoSharding()
+                              .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+              );
+    }
     // Execute the pipeline and return the result.
     return pipeline.run();
+  }
+
+  static class AddInsertTimestampToGenericRecord extends DoFn<GenericRecord, GenericRecord> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PubsubMessageToArchiveDoFn.class);
+
+    private final String readerSchemaStr;
+    private Schema readerSchema;
+
+    public AddInsertTimestampToGenericRecord(String readerSchemaStr) {
+      this.readerSchemaStr = readerSchemaStr;
+    }
+
+    @Setup
+    public void setupBundle() {
+      readerSchema = new Schema.Parser().parse(readerSchemaStr);
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext context) throws IOException {
+      GenericRecord record = context.element();
+      Schema writerSchema = record.getSchema();
+      try {
+        GenericDatumWriter<GenericRecord> w = new GenericDatumWriter<>(writerSchema);
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(outputStream, null);
+
+        w.write(record, encoder);
+        encoder.flush();
+
+        DatumReader<GenericRecord> reader = new GenericDatumReader<>(writerSchema, readerSchema);
+        BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(outputStream.toByteArray(), null);
+        GenericRecord result = reader.read(null, decoder);
+        
+        // adding current timestamp as microseconds, supported on BQ for avro batch loads
+        result.put(BQ_INSERT_TIMESTAMP_FIELDNAME, DateTime.now().getMillis() * 1000);
+
+        LOG.info("Generic Record with timestamp field {}", result);
+
+        context.output(result);
+      } catch (Exception e) {
+        LOG.warn("Error while trying to add timestamp to generic record {} with schema {}", record, writerSchema);
+        LOG.error("Error while adding timestamp to record", e);
+      }
+    }
+
+  }
+
+  static Schema addNullableTimestampFieldToAvroSchema(Schema base, String fieldName) {
+    Schema timestampMilliType
+            = Schema.createUnion(
+                    Lists.newArrayList(
+                            Schema.create(Schema.Type.NULL),
+                            LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG))));
+
+    List<Schema.Field> baseFields = base.getFields().stream()
+            .map(field -> new Schema.Field(field.name(), field.schema(), field.doc(), field.defaultVal()))
+            .collect(Collectors.toList());
+
+    baseFields.add(new Schema.Field(fieldName, timestampMilliType, null, JsonProperties.NULL_VALUE));
+
+    return Schema.createRecord(
+            base.getName(),
+            base.getDoc(),
+            base.getNamespace(),
+            false,
+            baseFields);
   }
 
   /**
