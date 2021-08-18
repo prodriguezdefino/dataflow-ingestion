@@ -44,7 +44,7 @@
     <!-- bom versions -->
     <google-cloud-bom.version>0.157.0</google-cloud-bom.version>
     <!-- library versions -->
-    <beam.version>2.33.0-SNAPSHOT</beam.version>
+    <beam.version>2.31.0</beam.version>
     <slf4j.version>1.7.30</slf4j.version>
   </properties>
     
