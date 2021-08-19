@@ -20,6 +20,7 @@ import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
@@ -72,7 +73,8 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
     String outputPrefix
             = Optional
                     .ofNullable(window)
-                    .map(w -> w.maxTimestamp().toDateTime())
+                    .map(w -> w instanceof IntervalWindow ? (IntervalWindow) w : null)
+                    .map(w -> w.end().toDateTime())
                     .map(time -> buildOutputPrefixPath(time))
                     .orElse("");
 
