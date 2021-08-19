@@ -31,9 +31,10 @@ import org.joda.time.format.PeriodParser;
  * A collection of static methods for Date manipulation.
  */
 public class Utilities {
-
+  
   private static final String OUTPUT_PATH_MINUTE_WINDOW = "YYYY/MM/DD/HH/mm/";
   private static final String OUTPUT_PATH_HOURLY_WINDOW = "YYYY/MM/DD/HH/";
+  private static final String OUTPUT_PATH_FLAT_WINDOW = "YYYYMMDDHHmm";
   private static final DateTimeFormatter OUTPUT_HOURLY_WINDOW_FILENAME_COMPONENT = ISODateTimeFormat.basicDateTime();
   private static final DateTimeFormatter YEAR = DateTimeFormat.forPattern("YYYY");
   private static final DateTimeFormatter MONTH = DateTimeFormat.forPattern("MM");
@@ -76,7 +77,7 @@ public class Utilities {
    * @return
    */
   public static String formatFilenameWindowComponent(DateTime time) {
-    return "w" + time.toString(OUTPUT_HOURLY_WINDOW_FILENAME_COMPONENT);
+    return time.toString(OUTPUT_HOURLY_WINDOW_FILENAME_COMPONENT);
   }
 
   /**
@@ -117,5 +118,14 @@ public class Utilities {
     checkArgument(duration.getMillis() > 0, "The window duration must be greater than 0!");
 
     return duration;
+  }
+
+  public static String buildFlatPathFromDateTime(DateTime time) {
+    return OUTPUT_PATH_FLAT_WINDOW
+            .replace("YYYY", YEAR.print(time))
+            .replace("MM", MONTH.print(time))
+            .replace("DD", DAY.print(time))
+            .replace("HH", HOUR.print(time))
+            .replace("mm", MINUTE.print(time));
   }
 }

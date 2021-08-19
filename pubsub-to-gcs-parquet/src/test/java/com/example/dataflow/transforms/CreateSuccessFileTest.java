@@ -202,11 +202,11 @@ public class CreateSuccessFileTest {
     // there has been files written
     Assert.assertTrue(!resourceList.isEmpty());
     // there is a success file
-    Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
+    Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("_SUCCESS")));
     // there is only one file
     Assert.assertTrue(resourceList.size() == 1);
     // the path of the success file should ends with the next hour
     Assert.assertTrue(resourceList.get(0).endsWith(
-            Instant.now().toDateTime().hourOfDay().addToCopy(1).hourOfDay().getAsText() + "/SUCCESS"));
+            Instant.now().toDateTime().hourOfDay().addToCopy(1).hourOfDay().getAsText() + "/_SUCCESS"));
   }
 }

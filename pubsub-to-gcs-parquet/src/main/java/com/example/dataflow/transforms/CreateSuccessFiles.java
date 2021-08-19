@@ -15,6 +15,7 @@
  */
 package com.example.dataflow.transforms;
 
+import static com.example.dataflow.utils.Utilities.buildFlatPathFromDateTime;
 import static com.example.dataflow.utils.Utilities.buildHourlyPartitionedPathFromDatetime;
 import static com.example.dataflow.utils.Utilities.buildPartitionedPathFromDatetime;
 import static com.example.dataflow.utils.Utilities.parseDuration;
@@ -24,7 +25,6 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
-import java.util.Objects;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
@@ -70,6 +70,8 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
   private String windowDuration;
   private ValueProvider<String> outputDirectory;
   private Boolean testingSeq = false;
+  private String successFileNamePrefix = "_SUCCESS";
+  private Boolean flatNamingStructure = false;
 
   public CreateSuccessFiles withProcessedDataTag(TupleTag<String> processedData) {
     this.processedData = processedData;
@@ -99,6 +101,16 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
   public CreateSuccessFiles withFanoutShards(Integer fanoutShards) {
     this.fanoutShards = fanoutShards;
+    return this;
+  }
+
+  public CreateSuccessFiles withSuccessFilePrefix(String prefix) {
+    this.successFileNamePrefix = prefix;
+    return this;
+  }
+
+  public CreateSuccessFiles withFlatNamingStructure(Boolean flatStructure) {
+    this.flatNamingStructure = flatStructure;
     return this;
   }
 
@@ -136,7 +148,9 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     WriteSuccessFileOnEmptyWindow writeOnEmpty = WriteSuccessFileOnEmptyWindow.create()
             .withOutputDirectory(outputDirectory)
             .withFanoutShards(fanoutShards)
-            .withWindowDuration(windowDuration);
+            .withWindowDuration(windowDuration)
+            .withFlatNamingStructure(flatNamingStructure)
+            .withSuccessFilePrefix(successFileNamePrefix);
 
     if (testingSeq) {
       writeOnEmpty = writeOnEmpty.withTestingSeq();
@@ -152,9 +166,11 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     input
             .get(processedData)
             .apply("WriteSuccessFile",
-                    CreateSuccessFile.create()
+                    CreateSuccessFileOnPresentData.create()
                             .withFanoutShards(fanoutShards)
-                            .withWindowDuration(windowDuration));
+                            .withWindowDuration(windowDuration)
+                            .withFlatNamingStructure(flatNamingStructure)
+                            .withSuccessFilePrefix(successFileNamePrefix));
 
     return PDone.in(input.getPipeline());
   }
@@ -163,25 +179,37 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
    * Given a String PCollection with the file names contained in a window, will wait for all of them to be completed and create a SUCCESS
    * file in the containing directory (All files are expected to be contained in the same directory).
    */
-  static class CreateSuccessFile extends PTransform<PCollection<String>, PCollection<Void>> {
+  static class CreateSuccessFileOnPresentData extends PTransform<PCollection<String>, PCollection<Void>> {
 
     private Integer fanoutShards = 10;
     private String windowDuration;
+    private String successFileNamePrefix = "_SUCCESS";
+    private Boolean flatNamingStructure = false;
 
-    public CreateSuccessFile() {
+    public CreateSuccessFileOnPresentData() {
     }
 
-    public static CreateSuccessFile create() {
-      return new CreateSuccessFile();
+    public static CreateSuccessFileOnPresentData create() {
+      return new CreateSuccessFileOnPresentData();
     }
 
-    public CreateSuccessFile withFanoutShards(Integer fanoutShards) {
+    public CreateSuccessFileOnPresentData withFanoutShards(Integer fanoutShards) {
       this.fanoutShards = fanoutShards;
       return this;
     }
 
-    public CreateSuccessFile withWindowDuration(String windowDuration) {
+    public CreateSuccessFileOnPresentData withWindowDuration(String windowDuration) {
       this.windowDuration = windowDuration;
+      return this;
+    }
+
+    public CreateSuccessFileOnPresentData withSuccessFilePrefix(String prefix) {
+      this.successFileNamePrefix = prefix;
+      return this;
+    }
+
+    public CreateSuccessFileOnPresentData withFlatNamingStructure(Boolean flatStructure) {
+      this.flatNamingStructure = flatStructure;
       return this;
     }
 
@@ -198,7 +226,11 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
                       Combine.globally(CombineFilesNames.create())
                               .withFanout(fanoutShards)
                               .withoutDefaults())
-              .apply("CreateSuccessFile", ParDo.of(new SuccessFileWriteDoFn()));
+              .apply("CreateSuccessFile",
+                      ParDo.of(
+                              new SuccessFileWriteDoFn()
+                                      .withFlatNamingStructure(flatNamingStructure)
+                                      .withSuccessFilePrefix(successFileNamePrefix)));
     }
 
     /**
@@ -222,28 +254,6 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
         public void merge(FilenameAcc accu) {
           this.add(accu.filename);
-        }
-
-        @Override
-        public int hashCode() {
-          int hash = 5;
-          hash = 89 * hash + Objects.hashCode(this.filename);
-          return hash;
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-          if (this == obj) {
-            return true;
-          }
-          if (obj == null) {
-            return false;
-          }
-          if (getClass() != obj.getClass()) {
-            return false;
-          }
-          final FilenameAcc other = (FilenameAcc) obj;
-          return Objects.equals(this.filename, other.filename);
         }
 
       }
@@ -285,13 +295,34 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
      */
     static class SuccessFileWriteDoFn extends DoFn<String, Void> {
 
+      private String successFileNamePrefix = "_SUCCESS";
+      private Boolean flatNamingStructure = false;
+
+      public SuccessFileWriteDoFn withSuccessFilePrefix(String prefix) {
+        this.successFileNamePrefix = prefix;
+        return this;
+      }
+
+      public SuccessFileWriteDoFn withFlatNamingStructure(Boolean flatStructure) {
+        this.flatNamingStructure = flatStructure;
+        return this;
+      }
+
       @ProcessElement
-      public void processElement(ProcessContext context) throws IOException {
-        createSuccessFileInPath(context.element(), false);
+      public void processElement(ProcessContext context, BoundedWindow window) throws IOException {
+        String fileName = successFileNamePrefix;
+
+        if (flatNamingStructure && window instanceof IntervalWindow) {
+          IntervalWindow intervalWindow = (IntervalWindow) window;
+          fileName = fileName
+                  + "_" + buildFlatPathFromDateTime(intervalWindow.start().toDateTime())
+                  + "_" + buildFlatPathFromDateTime(intervalWindow.end().toDateTime());
+        }
+
+        createSuccessFileInPath(context.element(), fileName, false);
         context.output((Void) null);
       }
     }
-
   }
 
   /**
@@ -305,6 +336,8 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     private Integer fanoutShards = 10;
     private Boolean testingSeq = false;
     private ValueProvider<String> outputDirectory;
+    private String successFileNamePrefix = "_SUCCESS";
+    private Boolean flatNamingStructure = false;
 
     private WriteSuccessFileOnEmptyWindow() {
     }
@@ -325,6 +358,16 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
     public WriteSuccessFileOnEmptyWindow withOutputDirectory(ValueProvider<String> outputDir) {
       this.outputDirectory = outputDir;
+      return this;
+    }
+
+    public WriteSuccessFileOnEmptyWindow withSuccessFilePrefix(String prefix) {
+      this.successFileNamePrefix = prefix;
+      return this;
+    }
+
+    public WriteSuccessFileOnEmptyWindow withFlatNamingStructure(Boolean flatStructure) {
+      this.flatNamingStructure = flatStructure;
       return this;
     }
 
@@ -375,7 +418,10 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
                       Combine.globally(Count.<Boolean>combineFn())
                               .withFanout(fanoutShards)
                               .withoutDefaults())
-              .apply("CheckDummySignal", ParDo.of(new CheckDataSignalOnWindowDoFn(outputDirectory)));
+              .apply("CheckDummySignal", ParDo.of(
+                      new CheckDataSignalOnWindowDoFn(outputDirectory)
+                              .withSuccessFilePrefix(successFileNamePrefix)
+                              .withFlatNamingStructure(flatNamingStructure)));
       return PDone.in(input.getPipeline());
     }
 
@@ -385,11 +431,24 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
     static class CheckDataSignalOnWindowDoFn extends DoFn<Long, Void> {
 
       private static final Logger LOG = LoggerFactory.getLogger(CheckDataSignalOnWindowDoFn.class);
+      private static final long DUMMY_SIGNAL_ONLY_COUNT = 1L;
 
       private final ValueProvider<String> rootFileLocation;
+      private String successFileNamePrefix = "_SUCCESS";
+      private Boolean flatNamingStructure = false;
 
       public CheckDataSignalOnWindowDoFn(ValueProvider<String> rootFileLocation) {
         this.rootFileLocation = rootFileLocation;
+      }
+
+      public CheckDataSignalOnWindowDoFn withSuccessFilePrefix(String prefix) {
+        this.successFileNamePrefix = prefix;
+        return this;
+      }
+
+      public CheckDataSignalOnWindowDoFn withFlatNamingStructure(Boolean flatStructure) {
+        this.flatNamingStructure = flatStructure;
+        return this;
       }
 
       @ProcessElement
@@ -397,8 +456,9 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
         LOG.debug("Found {} signals on Pane {} and Window {}.", context.element(), window.toString(), pane.toString());
 
         // if only the dummy signal has arrived in this window
-        if (context.element() < 2) {
+        if (context.element() == DUMMY_SIGNAL_ONLY_COUNT) {
           String outputPath = rootFileLocation.isAccessible() ? rootFileLocation.get() : "";
+          String fileName = successFileNamePrefix;
 
           if (window instanceof IntervalWindow) {
             IntervalWindow intervalWindow = (IntervalWindow) window;
@@ -409,23 +469,29 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
             } else {
               outputPath = outputPath + buildPartitionedPathFromDatetime(time);
             }
+            if (flatNamingStructure) {
+              fileName = fileName
+                      + "_" + buildFlatPathFromDateTime(intervalWindow.start().toDateTime())
+                      + "_" + buildFlatPathFromDateTime(intervalWindow.end().toDateTime());
+            }
           } else {
             outputPath = outputPath + buildPartitionedPathFromDatetime(Instant.now().toDateTime());
           }
+
           LOG.debug("Will create SUCCESS file at {}", outputPath);
-          createSuccessFileInPath(outputPath, true);
+          createSuccessFileInPath(outputPath, fileName, true);
         }
       }
     }
   }
 
-  private static void createSuccessFileInPath(String path, boolean isDirectory) {
+  private static void createSuccessFileInPath(String path, String fileName, boolean isDirectory) {
     // remove trailing / if exists since is not supported at the FileSystems level
     path = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
 
     ResourceId dirResourceFiles = FileSystems.matchNewResource(path, isDirectory).getCurrentDirectory();
     ResourceId successFile = dirResourceFiles
-            .resolve("SUCCESS", ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
+            .resolve(fileName, ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
 
     LOG.debug("Will create success file in path {}.", successFile.toString());
     try ( WritableByteChannel writeChannel = FileSystems.create(successFile, MimeTypes.TEXT)) {

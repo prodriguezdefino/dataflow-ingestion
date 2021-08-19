@@ -51,15 +51,12 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
   private String successFileWindowDuration;
   private Integer numShards = 400;
   private Integer fanoutShards = 400;
-  private Integer composeShards = 10;
   private Boolean hourlySuccessFiles = false;
-  private Boolean composeSmallFiles = false;
-  private ValueProvider<String> composeTempDirectory;
+  private String successFileNamePrefix = "_SUCCESS";
+  private Boolean flatNamingStructure = false;
   private ValueProvider<String> outputDirectory;
-  private Boolean cleanComposePartFiles = true;
   private Boolean createSuccessFile = true;
   private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
-  private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
   private Coder<DataT> coder;
   private Boolean testingSeq = false;
 
@@ -69,6 +66,16 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
   @VisibleForTesting
   WriteFormatToFileDestination<DataT> withTestingSeq() {
     this.testingSeq = true;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withSuccessFilePrefix(String prefix) {
+    this.successFileNamePrefix = prefix;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withFlatNamingStructure(Boolean flatStructure) {
+    this.flatNamingStructure = flatStructure;
     return this;
   }
 
@@ -84,11 +91,6 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
 
   public WriteFormatToFileDestination<DataT> withTempDirectory(ValueProvider<String> tempDirectory) {
     this.tempDirectory = tempDirectory;
-    return this;
-  }
-
-  public WriteFormatToFileDestination<DataT> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
-    this.composeTempDirectory = composeTempDirectory;
     return this;
   }
 
@@ -115,23 +117,8 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
     return this;
   }
 
-  public WriteFormatToFileDestination<DataT> withComposeShards(Integer composeShards) {
-    this.composeShards = composeShards;
-    return this;
-  }
-
   public WriteFormatToFileDestination<DataT> withFanoutShards(Integer fanoutShards) {
     this.fanoutShards = fanoutShards;
-    return this;
-  }
-
-  public WriteFormatToFileDestination<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
-    this.composeSmallFiles = composeSmallFiles;
-    return this;
-  }
-
-  public WriteFormatToFileDestination<DataT> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
-    this.cleanComposePartFiles = cleanComposePartFiles;
     return this;
   }
 
@@ -142,11 +129,6 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
 
   public WriteFormatToFileDestination<DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
     this.sinkProvider = sinkProvider;
-    return this;
-  }
-
-  public WriteFormatToFileDestination<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
-    this.composeFunction = composeFunction;
     return this;
   }
 
@@ -183,22 +165,20 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
 
   @Override
   public PDone expand(PCollection<DataT> input) {
-
-    if (composeSmallFiles && composeTempDirectory.isAccessible()) {
-      checkArgument(composeTempDirectory.get() != null,
-              "When composing files a temp location should be configured in option --composeTempDirectory");
-    }
-
     // create the naming strategy for created files
     WindowedFileNaming naming = new WindowedFileNaming(
             outputFilenamePrefix,
             outputFilenameSuffix,
             RandomStringUtils.randomAlphanumeric(5));
 
+    if (flatNamingStructure) {
+      naming = naming.withFlatNamingStructure();
+    }
+
     if (hourlySuccessFiles) {
-      naming = naming.cloneWithHourlyPaths();
+      naming = naming.withHourlyPathNamingStructure();
     } else {
-      checkArgument(successFileWindowDuration != null,
+      checkArgument(successFileWindowDuration != null && !successFileWindowDuration.isEmpty(),
               "A window duration should be provided for success file using withSuccessFileWindowDuration method "
               + "when duration not explicitly set");
     }
@@ -233,43 +213,16 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
     // capture data to be ingested and send it to GCS (as final or temp yet to be determined)
     WriteFilesResult<Void> writtenFiles
             = dataToBeWritten
-                    .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
+                    .apply("WriteFiles",
                             FileIO.<DataT>write()
                                     .via(sinkProvider.apply())
                                     .withTempDirectory(tempDirectory)
                                     // we will use the same naming for all writes (final or temps) to ease debugging (when needed)
                                     .withNaming(naming)
                                     .withNumShards(numShards)
-                                    // in case we are composing the files we need to send the initial writes to a temp location
-                                    .to(composeSmallFiles
-                                            ? composeTempDirectory
-                                            : outputDirectory));
+                                    .to(outputDirectory));
 
     PCollection<String> fileNames = null;
-
-    if (composeSmallFiles) {
-      // we create a compose files transform
-      ComposeGCSFiles<Void, DataT> composeTransform
-              = ComposeGCSFiles
-                      .<Void, DataT>create()
-                      .withFileNaming(naming)
-                      .withFilePrefix(outputFilenamePrefix)
-                      .withFileSuffix(outputFilenameSuffix)
-                      .withOutputPath(outputDirectory)
-                      .withComposeShards(composeShards)
-                      .withSinkProvider(sinkProvider)
-                      .withComposeFunction(composeFunction);
-
-      // check if we don't need to clean composing parts
-      if (!cleanComposePartFiles) {
-        composeTransform.withoutCleaningParts();
-      }
-
-      fileNames = writtenFiles
-              .getPerDestinationOutputFilenames()
-              .apply("RemoveDestinationKeys", Values.create())
-              .apply("ComposeSmallFiles", composeTransform);
-    }
 
     if (createSuccessFile) {
       // check if this has not being initialized
@@ -292,7 +245,9 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
                       .withProcessedDataTag(processedDataTag)
                       .withFanoutShards(fanoutShards)
                       .withSuccessFileWindowDuration(successFileWindowDuration)
-                      .withOutputDirectory(outputDirectory);
+                      .withOutputDirectory(outputDirectory)
+                      .withFlatNamingStructure(flatNamingStructure)
+                      .withSuccessFilePrefix(successFileNamePrefix);
 
       if (testingSeq) {
         createSuccessFiles = createSuccessFiles.withTestingSeq();
@@ -330,7 +285,7 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
     public void processElement(ProcessContext context, PaneInfo pane) throws IOException {
       context.output(dataToBeProcessed, context.element());
 
-      // In case we are producing a GenericRecord, we can check if we are in the first pane
+      // In case we are producing an output, we can check if we are in the first pane
       // of the window and propagate a signal of data in the window. 
       if (pane.isFirst() && countPerBundle == 0L) {
         countPerBundle++;

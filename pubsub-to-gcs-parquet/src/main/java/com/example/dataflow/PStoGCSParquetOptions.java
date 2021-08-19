@@ -48,7 +48,7 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
   void setComposeTempDirectory(ValueProvider<String> value);
 
   @Description("The filename prefix of the files to write to.")
-  @Default.String("prefix-name")
+  @Default.String("_test")
   ValueProvider<String> getOutputFilenamePrefix();
 
   void setOutputFilenamePrefix(ValueProvider<String> value);
@@ -82,7 +82,7 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
           + "Ns (for seconds, example: 5s), "
           + "Nm (for minutes, example: 12m), "
           + "Nh (for hours, example: 2h).")
-  @Default.String("60m")
+  @Default.String("")
   String getSuccessFileWindowDuration();
 
   void setSuccessFileWindowDuration(String value);
@@ -128,5 +128,17 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
   String getAvroSchemaFileLocation();
 
   void setAvroSchemaFileLocation(String value);
+
+  @Description("Local path to the AVRO schema to use.")
+  @Default.String("_SUCCESS")
+  String getSuccessFileNamePrefix();
+
+  void setSuccessFileNamePrefix(String value);
+
+  @Description("Local path to the AVRO schema to use.")
+  @Default.Boolean(false)
+  Boolean isFlatNamingStructure();
+
+  void setFlatNamingStructure(Boolean value);
 
 }

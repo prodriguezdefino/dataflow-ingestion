@@ -198,17 +198,14 @@ public class PubsubToGCSParquet {
                                     .sink(new Schema.Parser().parse(avroSchemaStr))
                                     .withCompressionCodec(CompressionCodecName.SNAPPY))
                     .withCoder(AvroCoder.of(new Schema.Parser().parse(avroSchemaStr)))
-                    .withComposeTempDirectory(options.getComposeTempDirectory())
-                    .withComposeSmallFiles(options.isComposeSmallFiles())
-                    .withCleanComposePartFiles(options.isCleanComposePartFiles())
-                    .withComposeShards(options.getComposeShards())
-                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles)
                     .withNumShards(options.getNumShards())
                     .withOutputDirectory(options.getOutputDirectory())
                     .withOutputFilenamePrefix(options.getOutputFilenamePrefix())
                     .withOutputFilenameSuffix(options.getOutputFilenameSuffix())
                     .withTempDirectory(options.getTempDirectory())
-                    .withHourlySuccessFiles(options.isHourlySuccessFiles());
+                    .withHourlySuccessFiles(options.isHourlySuccessFiles())
+                    .withSuccessFilePrefix(options.getSuccessFileNamePrefix())
+                    .withFlatNamingStructure(options.isFlatNamingStructure());
 
     if (!options.isHourlySuccessFiles()) {
       write = write.withSuccessFilesWindowDuration(options.getFileWriteWindowDuration());

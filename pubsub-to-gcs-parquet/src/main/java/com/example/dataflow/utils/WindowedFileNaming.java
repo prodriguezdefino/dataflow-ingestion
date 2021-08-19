@@ -21,6 +21,7 @@ import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
+import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +35,8 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
   private final ValueProvider<String> filePrefix;
   private final ValueProvider<String> fileSuffix;
   private final String exec;
-  private Boolean includeMinutesInPath = true;
+  private Boolean flatNamingStructure = false;
+  private Boolean hourlyPathNamingStructure = false;
 
   public WindowedFileNaming(ValueProvider<String> filePrefix, ValueProvider<String> fileSuffix, String exec) {
     this.filePrefix = filePrefix;
@@ -42,36 +44,46 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
     this.exec = exec;
   }
 
-  public WindowedFileNaming withHourlyPaths() {
-    this.includeMinutesInPath = false;
+  public WindowedFileNaming withFlatNamingStructure() {
+    this.flatNamingStructure = true;
+    this.hourlyPathNamingStructure = false;
     return this;
   }
 
-  public WindowedFileNaming cloneWithHourlyPaths() {
-    WindowedFileNaming naming = new WindowedFileNaming(this.filePrefix, this.fileSuffix, this.exec);
-    naming.includeMinutesInPath = false;
-    return naming;
+  public WindowedFileNaming withHourlyPathNamingStructure() {
+    this.flatNamingStructure = false;
+    this.hourlyPathNamingStructure = true;
+    return this;
+  }
+
+  private String buildOutputPrefixPath(DateTime time) {
+    if (flatNamingStructure) {
+      // no directory structure
+      return "";
+    } else if (hourlyPathNamingStructure) {
+      return Utilities.buildHourlyPartitionedPathFromDatetime(time);
+    } else {
+      return Utilities.buildPartitionedPathFromDatetime(time);
+    }
   }
 
   @Override
   public String getFilename(BoundedWindow window, PaneInfo pane, int numShards, int shardIndex, Compression compression) {
-    String outputPath
+    String outputPrefix
             = Optional
                     .ofNullable(window)
                     .map(w -> w.maxTimestamp().toDateTime())
-                    .map(time -> includeMinutesInPath
-                    ? Utilities.buildPartitionedPathFromDatetime(time)
-                    : Utilities.buildHourlyPartitionedPathFromDatetime(time))
+                    .map(time -> buildOutputPrefixPath(time))
                     .orElse("");
 
-    StringBuilder fileNameSB = new StringBuilder(outputPath);
+    StringBuilder fileNameSB = new StringBuilder(outputPrefix);
 
     if (!filePrefix.get().isEmpty()) {
       fileNameSB.append(filePrefix.get());
     }
 
-    if (!includeMinutesInPath && window != null) {
-      fileNameSB.append("-").append(Utilities.formatFilenameWindowComponent(window.maxTimestamp().toDateTime()));
+    if ((flatNamingStructure || hourlyPathNamingStructure) && window != null) {
+      fileNameSB.append("-window-").append(Utilities.formatFilenameWindowComponent(window.maxTimestamp().toDateTime()));
     }
 
     fileNameSB.append("-pane-").append(pane.getIndex())
