@@ -16,7 +16,6 @@
 package com.example.dataflow.transforms;
 
 import com.example.dataflow.utils.Utilities;
-import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
@@ -32,7 +31,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.CoderException;
@@ -42,7 +40,6 @@ import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryInsertError;
 import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
-import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -51,12 +48,17 @@ import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  *
  */
-public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQueryInsertError>, PDone> {
+public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQueryInsertError>, PCollection<BigQueryInsertError>> {
+  private static final Logger LOG = LoggerFactory.getLogger(ProcessBQStreamingInsertErrors.class);
 
   private final String tableSpec;
   private final TableSchema bqSchema;
@@ -75,56 +77,45 @@ public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQu
   }
 
   @Override
-  public PDone expand(PCollection<BigQueryInsertError> input) {
-    WriteResult errorFixResults
-            = input
-                    .apply(insertErrorWindowDuration + "Window",
-                            Window.<BigQueryInsertError>into(
-                                    FixedWindows.of(Utilities.parseDuration(insertErrorWindowDuration)))
-                                    .withAllowedLateness(Utilities.parseDuration(insertErrorWindowDuration).dividedBy(4L))
-                                    .discardingFiredPanes())
-                    .apply("ChannelErrors", ParDo.of(new ChannelSchemaErrors(recoverableMissingFieldname)))
-                    .setCoder(KvCoder.of(TableReferenceCoder.of(), TableRowJsonCoder.of()))
-                    .apply("GroupByErrorType", GroupByKey.create())
-                    .apply("ResolveError", ParDo.of(new FixSchemaErrors(recoverableMissingFieldname)))
-                    .apply("TryAgainWriteToBQ",
-                            BigQueryIO.writeTableRows()
-                                    .skipInvalidRows()
-                                    .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                                    .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                                    .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                                    .to(tableSpec)
-                                    .withSchema(bqSchema)
-                                    .withExtendedErrorInfo()
-                                    .withAutoSharding()
-                                    .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
-
-    errorFixResults
-            .getFailedInsertsWithErr()
-            .apply("WriteToErrorTable",
-                    BigQueryIO.<BigQueryInsertError>write()
+  public PCollection<BigQueryInsertError> expand(PCollection<BigQueryInsertError> input) {
+    PCollectionTuple channeledErrors = input
+            .apply(insertErrorWindowDuration + "Window",
+                    Window.<BigQueryInsertError>into(
+                            FixedWindows.of(Utilities.parseDuration(insertErrorWindowDuration)))
+                            .discardingFiredPanes())
+            .apply("ChannelErrors",
+                    ParDo
+                            .of(new ChannelSchemaErrors(recoverableMissingFieldname))
+                            .withOutputTags(ChannelSchemaErrors.RECOVERABLE_ERRORS,
+                                    TupleTagList.of(ChannelSchemaErrors.NON_RECOVERABLE_ERRORS)));
+    channeledErrors
+            .get(ChannelSchemaErrors.RECOVERABLE_ERRORS)
+            .setCoder(KvCoder.of(TableReferenceCoder.of(), TableRowJsonCoder.of()))
+            .apply("GroupByErrorType", GroupByKey.create())
+            .apply("ResolveError", ParDo.of(new FixSchemaErrors(recoverableMissingFieldname)))
+            .apply("TryAgainWriteToBQ",
+                    BigQueryIO.writeTableRows()
                             .skipInvalidRows()
                             .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
                             .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
                             .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                            .to(tableSpec + "-errors")
-                            .withSchema(new TableSchema()
-                                    .setFields(
-                                            Arrays.asList(
-                                                    new TableFieldSchema().setName("error_message").setType("STRING"),
-                                                    new TableFieldSchema().setName("failed_row").setType("STRING"))))
-                            .withFormatFunction(bqError
-                                    -> new TableRow()
-                                    .set("error_message", bqError.getError().toString())
-                                    .set("failed_row", bqError.getRow()))
+                            .to(tableSpec)
+                            .withSchema(bqSchema)
                             .withExtendedErrorInfo()
-                            .withAutoSharding()
-                            .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+                            // We expect to have fixed the previously failed rows, that's why we force all the retries.
+                            // After the retries have stabilized we should not see more data coming into this branch of the pipeline.
+                            .withFailedInsertRetryPolicy(InsertRetryPolicy.alwaysRetry()));
 
-    return PDone.in(input.getPipeline());
+    // those errors that are non recoverable we return them for DLQ processing downstream
+    return channeledErrors.get(ChannelSchemaErrors.NON_RECOVERABLE_ERRORS);
   }
 
   static class ChannelSchemaErrors extends DoFn<BigQueryInsertError, KV<TableReference, TableRow>> {
+
+    private static final TupleTag<BigQueryInsertError> NON_RECOVERABLE_ERRORS = new TupleTag<BigQueryInsertError>() {
+    };
+    private static final TupleTag<KV<TableReference, TableRow>> RECOVERABLE_ERRORS = new TupleTag<KV<TableReference, TableRow>>() {
+    };
 
     private final String recoverableMissingFieldName;
 
@@ -135,10 +126,12 @@ public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQu
     @ProcessElement
     public void processElement(ProcessContext context) throws IOException {
       BigQueryInsertError error = context.element();
-      System.out.println(error);
+      LOG.info("Captured insert error {}",error.getError().toPrettyString());
       error.getError().getErrors().forEach(err -> {
         if (err.getLocation().equals(recoverableMissingFieldName)) {
-          context.output(KV.of(error.getTable(), error.getRow()));
+          context.output(RECOVERABLE_ERRORS, KV.of(error.getTable(), error.getRow()));
+        } else {
+          context.output(NON_RECOVERABLE_ERRORS, error);
         }
       });
     }
@@ -221,7 +214,5 @@ public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQu
         table.toBuilder().setDefinition(StandardTableDefinition.of(newSchema)).build().update();
       }
     }
-
   }
-
 }
