@@ -17,6 +17,7 @@ package com.example.dataflow;
 
 import com.example.dataflow.transforms.WriteFormatToFileDestination;
 import static com.example.dataflow.utils.Utilities.parseDuration;
+import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.nio.channels.Channels;
 import java.nio.channels.SeekableByteChannel;
@@ -146,7 +147,10 @@ public class PubsubToGCSParquet {
   static PipelineResult run(PStoGCSParquetOptions options) throws IOException {
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
-
+    
+    Preconditions.checkArgument(options.isFlatNamingStructure() ^ options.isHourlySuccessFiles(), 
+            "Flat filename and hourly filepath structure are mutually exclusive.");
+    
     // read AVRO schema from local filesystem
     final String avroSchemaStr = Files.readAllLines(Paths.get(options.getAvroSchemaFileLocation()))
             .stream()

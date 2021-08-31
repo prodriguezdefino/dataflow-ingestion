@@ -55,7 +55,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * This transform will try to capture the error type after a failed Streaming write into BQ and decide, based on the configured fields, if a
+ * schema update is needed in order to overcome the problem. Once the schema has been updated the writes into BQ will be retried until
+ * succeed. In case the errors are not schema related it will propagate them downstream for later handling.
  *
+ * Is expected that the inserts with the new schema will stabilize after some secs/mins, during that time frame inserts will be retried
+ * until successful.
  */
 public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQueryInsertError>, PCollection<BigQueryInsertError>> {
   private static final Logger LOG = LoggerFactory.getLogger(ProcessBQStreamingInsertErrors.class);
@@ -96,6 +101,8 @@ public class ProcessBQStreamingInsertErrors extends PTransform<PCollection<BigQu
             .apply("TryAgainWriteToBQ",
                     BigQueryIO.writeTableRows()
                             .skipInvalidRows()
+                            // for those values we have not registered as part of the new schema we ignore them
+                            .ignoreUnknownValues()
                             .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
                             .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
                             .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
