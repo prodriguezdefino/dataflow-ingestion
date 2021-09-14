@@ -113,8 +113,8 @@ public class ComposeFilesTest {
 
     String destinationPath = temporaryFolder.getRoot().getAbsolutePath() + "/compose-output.parquet";
 
-    ComposeGCSFiles.ComposeFiles<GenericRecord> cfiles
-            = new ComposeGCSFiles.ComposeFiles<GenericRecord>()
+    ComposeFiles.ExecComposeFiles<GenericRecord> cfiles
+            = new ComposeFiles.ExecComposeFiles<GenericRecord>()
                     .withSinkProvider(
                             () -> ParquetIO
                                     .sink(SCHEMA)
@@ -123,10 +123,10 @@ public class ComposeFilesTest {
 
     // register coder for the test pipeline
     testPipeline.getCoderRegistry().registerCoderForClass(
-            ComposeGCSFiles.ComposeContext.class,
-            ComposeGCSFiles.ComposeContextCoder.of());
+            ComposeFiles.ComposeContext.class,
+            ComposeFiles.ComposeContextCoder.of());
 
-    PCollection<ComposeGCSFiles.ComposeContext> ctxPC
+    PCollection<ComposeFiles.ComposeContext> ctxPC
             = testPipeline
                     .apply(Create.of(resourceList))
                     // first match all the files to be processed
@@ -137,9 +137,9 @@ public class ComposeFilesTest {
                     .apply(WithKeys.of((Void) null))
                     .apply(GroupByKey.create())
                     .apply(MapElements
-                            .into(TypeDescriptor.of(ComposeGCSFiles.ComposeContext.class))
+                            .into(TypeDescriptor.of(ComposeFiles.ComposeContext.class))
                             .via(readableFiles
-                                    -> ComposeGCSFiles.ComposeContext.of(
+                                    -> ComposeFiles.ComposeContext.of(
                                     1,
                                     1,
                                     null,
@@ -152,10 +152,10 @@ public class ComposeFilesTest {
 
     PAssert.that(ctxPC).satisfies(elem -> {
       Assert.assertNotNull(elem);
-      List<ComposeGCSFiles.ComposeContext> composeCtxs
+      List<ComposeFiles.ComposeContext> composeCtxs
               = StreamSupport.stream(elem.spliterator(), false).collect(Collectors.toList());
       Assert.assertEquals(1, composeCtxs.size());
-      ComposeGCSFiles.ComposeContext composeCtx = composeCtxs.get(0);
+      ComposeFiles.ComposeContext composeCtx = composeCtxs.get(0);
       File output = Paths.get(destinationPath).toFile();
       Assert.assertEquals(output.isFile(), true);
       Assert.assertTrue("Output file should not be empty.", 0 <= output.length());

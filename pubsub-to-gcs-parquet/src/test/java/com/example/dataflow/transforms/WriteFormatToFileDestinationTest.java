@@ -1,5 +1,6 @@
 package com.example.dataflow.transforms;
 
+import com.example.dataflow.PubsubToGCSParquet;
 import com.example.dataflow.utils.Utilities;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -35,7 +36,60 @@ public class WriteFormatToFileDestinationTest {
   public transient TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void testAvroWrites() throws IOException {
+  public void testParquetWrite() throws IOException {
+    setupPipeline(
+            WriteFormatToFileDestination.<GenericRecord>create()
+                    .withNumShards(1));
+
+    testPipeline.run().waitUntilFinish();
+
+    // create the context object needed for the DoFn test
+    List<String> resourceList = Files
+            .walk(temporaryFolder.getRoot().toPath())
+            .filter(Files::isRegularFile)
+            .map(p -> p.toAbsolutePath().toString())
+            .collect(Collectors.toList());
+
+    // there has been files written
+    Assert.assertTrue(!resourceList.isEmpty());
+    // there is a success file
+    Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
+    // there are more files with data
+    Assert.assertTrue(resourceList.size() > 1);
+  }
+
+  @Test
+  public void testParquetComposeWrite() throws IOException {
+
+    String outputPath = temporaryFolder.getRoot().getAbsolutePath() + '/';
+
+    setupPipeline(
+            WriteFormatToFileDestination.<GenericRecord>create()
+                    .withNumShards(2)
+                    // we expect only one output file
+                    .withComposeShards(1)
+                    .withComposeSmallFiles(true)
+                    .withComposeTempDirectory(ValueProvider.StaticValueProvider.of(outputPath + "temp/compose"))
+                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles));
+
+    testPipeline.run().waitUntilFinish();
+
+    // create the context object needed for the DoFn test
+    List<String> resourceList = Files
+            .walk(temporaryFolder.getRoot().toPath())
+            .filter(Files::isRegularFile)
+            .map(p -> p.toAbsolutePath().toString())
+            .collect(Collectors.toList());
+
+    // there has been files written
+    Assert.assertTrue(!resourceList.isEmpty());
+    // there is a success file
+    Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
+    // there are more files with data
+    Assert.assertTrue(resourceList.size() > 1);
+  }
+
+  private void setupPipeline(WriteFormatToFileDestination<GenericRecord> writeFormat) {
 
     String outputPath = temporaryFolder.getRoot().getAbsolutePath() + '/';
     List<GenericRecord> records = ComposeFilesTest.generateGenericRecords(2);
@@ -61,12 +115,11 @@ public class WriteFormatToFileDestinationTest {
                     .<GenericRecord>into(FixedWindows.of(Utilities.parseDuration("1m")))
                     .discardingFiredPanes())
             .apply("WriteParquetToGCS",
-                    WriteFormatToFileDestination.<GenericRecord>create()
+                    writeFormat
                             .withSinkProvider(
                                     () -> ParquetIO
                                             .sink(new Schema.Parser().parse(ComposeFilesTest.SCHEMA_STRING))
                                             .withCompressionCodec(CompressionCodecName.UNCOMPRESSED))
-                            .withNumShards(1)
                             .withCoder(coder)
                             .withOutputDirectory(
                                     ValueProvider.StaticValueProvider.of(outputPath))
@@ -77,21 +130,5 @@ public class WriteFormatToFileDestinationTest {
                             .withSuccessFilesWindowDuration("5s")
                             // to avoid generating infinit long sequences for empty windows
                             .withTestingSeq());
-
-    testPipeline.run().waitUntilFinish();
-
-    // create the context object needed for the DoFn test
-    List<String> resourceList = Files
-            .walk(temporaryFolder.getRoot().toPath())
-            .filter(Files::isRegularFile)
-            .map(p -> p.toAbsolutePath().toString())
-            .collect(Collectors.toList());
-
-    // there has been files written
-    Assert.assertTrue(!resourceList.isEmpty());
-    // there is a success file
-    Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
-    // there are more files with data
-    Assert.assertTrue(resourceList.size() > 1);
   }
 }

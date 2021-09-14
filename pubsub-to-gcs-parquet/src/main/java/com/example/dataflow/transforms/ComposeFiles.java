@@ -61,9 +61,10 @@ import org.slf4j.LoggerFactory;
 /**
  * Composes a list of GCS objects (files) into bigger ones. By default all the original part files are deleted, this can be disabled.
  */
-public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
+public class ComposeFiles<KeyT, DataT> extends PTransform<PCollection<String>, PCollection<String>> {
 
   private Integer composeShards = 10;
+  private ValueProvider<String> tempPath;
   private ValueProvider<String> outputPath;
   private ValueProvider<String> filePrefix;
   private ValueProvider<String> fileSuffix;
@@ -72,49 +73,54 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
   private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
   private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
-  private ComposeGCSFiles() {
+  private ComposeFiles() {
   }
 
-  static public <KeyT, SinkType> ComposeGCSFiles<KeyT, SinkType> create() {
-    return new ComposeGCSFiles<>();
+  static public <KeyT, SinkType> ComposeFiles<KeyT, SinkType> create() {
+    return new ComposeFiles<>();
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withoutCleaningParts() {
+  public ComposeFiles<KeyT, DataT> withoutCleaningParts() {
     this.cleanParts = false;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withFileNaming(WindowedFileNaming naming) {
+  public ComposeFiles<KeyT, DataT> withFileNaming(WindowedFileNaming naming) {
     this.naming = naming;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withOutputPath(ValueProvider<String> outputPath) {
+  public ComposeFiles<KeyT, DataT> withOutputPath(ValueProvider<String> outputPath) {
     this.outputPath = outputPath;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withFilePrefix(ValueProvider<String> filePrefix) {
+  public ComposeFiles<KeyT, DataT> withTempPath(ValueProvider<String> tempPath) {
+    this.tempPath = tempPath;
+    return this;
+  }
+
+  public ComposeFiles<KeyT, DataT> withFilePrefix(ValueProvider<String> filePrefix) {
     this.filePrefix = filePrefix;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withFileSuffix(ValueProvider<String> fileSuffix) {
+  public ComposeFiles<KeyT, DataT> withFileSuffix(ValueProvider<String> fileSuffix) {
     this.fileSuffix = fileSuffix;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withComposeShards(Integer composeShards) {
+  public ComposeFiles<KeyT, DataT> withComposeShards(Integer composeShards) {
     this.composeShards = composeShards;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
+  public ComposeFiles<KeyT, DataT> withSinkProvider(SerializableProvider<FileIO.Sink<DataT>> sinkProvider) {
     this.sinkProvider = sinkProvider;
     return this;
   }
 
-  public ComposeGCSFiles<KeyT, DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+  public ComposeFiles<KeyT, DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
     this.composeFunction = composeFunction;
     return this;
   }
@@ -126,6 +132,7 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
     checkArgument(sinkProvider != null,
             "A provider function returning fully configured Sink should be provided using withSinkProvider method.");
     checkArgument(composeFunction != null, "A compose function implementation should be provided.");
+    checkArgument(tempPath != null, "A temporary directory should be provided.");
   }
 
   @SuppressWarnings("deprecation")
@@ -145,18 +152,19 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
             // capture readable matches
             .apply("ToReadable", FileIO.readMatches())
             // group into batches
-            .apply(WithKeys.of(v -> new Random().nextInt(composeShards)))
+            .apply(WithKeys.of(v
+                    -> new Random().nextInt(composeShards)))
             .setCoder(KvCoder.of(VarIntCoder.of(), ReadableFileCoder.of()))
             .apply(GroupByKey.create())
             // create the file bundles that will compone the composed files
             .apply("CreateComposeBundles", ParDo.of(
-                    new CreateComposeBundles(naming, composeShards)))
+                    new CreateComposeBundles(tempPath, naming, composeShards)))
             // materialize this results, making bundles stable
             .apply("ReshuffleBundles",
                     org.apache.beam.sdk.transforms.Reshuffle.<ComposeContext>viaRandomKey())
             // create the composed temp files
             .apply("ComposeTemporaryFiles",
-                    ParDo.of(new ComposeFiles<DataT>()
+                    ParDo.of(new ExecComposeFiles<DataT>()
                             .withSinkProvider(sinkProvider)
                             .withComposeFunction(composeFunction)))
             // materialize the temp files, will reuse same temp files in retries later on 
@@ -383,17 +391,19 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
 
     private final WindowedFileNaming naming;
     private final Integer totalBundles;
-    private String tempPathName;
+    private final ValueProvider<String> tempPath;
+    private String fullTempPath;
 
-    public CreateComposeBundles(WindowedFileNaming naming, Integer totalBundles) {
+    public CreateComposeBundles(ValueProvider<String> tempPath, WindowedFileNaming naming, Integer totalBundles) {
       this.naming = naming;
       this.totalBundles = totalBundles;
+      this.tempPath = tempPath;
     }
 
     @StartBundle
     public void start(PipelineOptions options) {
-      tempPathName
-              = (options.getTempLocation().endsWith("/") ? options.getTempLocation() : options.getTempLocation() + "/")
+      fullTempPath
+              = (tempPath.get().endsWith("/") ? tempPath.get() : tempPath.get() + "/")
               + options.getJobName() + "/";
     }
 
@@ -405,7 +415,7 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
       Integer currentKey = context.element().getKey();
 
       String tempFilePartialFileName
-              = tempPathName + naming.getFilename(window, pane, totalBundles, currentKey, Compression.UNCOMPRESSED);
+              = fullTempPath + naming.getFilename(window, pane, totalBundles, currentKey, Compression.UNCOMPRESSED);
 
       List<FileIO.ReadableFile> composeParts
               = StreamSupport
@@ -428,18 +438,18 @@ public class ComposeGCSFiles<KeyT, DataT> extends PTransform<PCollection<String>
    * Given a compose context object will grab all the part files, extract the object names and create a compose object in a temporary
    * location.
    */
-  static class ComposeFiles<K> extends DoFn<ComposeContext, ComposeContext> {
+  static class ExecComposeFiles<K> extends DoFn<ComposeContext, ComposeContext> {
 
     private static final Logger LOG = LoggerFactory.getLogger(ComposeFiles.class);
     private SerializableProvider<FileIO.Sink<K>> sinkProvider;
     private ComposeFunction<FileIO.Sink<K>> composeFunction;
 
-    public ComposeFiles<K> withSinkProvider(SerializableProvider<FileIO.Sink<K>> sinkProvider) {
+    public ExecComposeFiles<K> withSinkProvider(SerializableProvider<FileIO.Sink<K>> sinkProvider) {
       this.sinkProvider = sinkProvider;
       return this;
     }
 
-    public ComposeFiles<K> withComposeFunction(ComposeFunction<FileIO.Sink<K>> composeFunction) {
+    public ExecComposeFiles<K> withComposeFunction(ComposeFunction<FileIO.Sink<K>> composeFunction) {
       this.composeFunction = composeFunction;
       return this;
     }

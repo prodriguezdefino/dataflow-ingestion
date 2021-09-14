@@ -59,6 +59,11 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
   private SerializableProvider<FileIO.Sink<DataT>> sinkProvider;
   private Coder<DataT> coder;
   private Boolean testingSeq = false;
+  private Integer composeShards = 10;
+  private Boolean composeSmallFiles = false;
+  private ValueProvider<String> composeTempDirectory;
+  private Boolean cleanComposePartFiles = true;
+  private ComposeFunction<FileIO.Sink<DataT>> composeFunction;
 
   private WriteFormatToFileDestination() {
   }
@@ -137,6 +142,31 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
     return this;
   }
 
+  public WriteFormatToFileDestination<DataT> withComposeTempDirectory(ValueProvider<String> composeTempDirectory) {
+    this.composeTempDirectory = composeTempDirectory;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withComposeShards(Integer composeShards) {
+    this.composeShards = composeShards;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withComposeSmallFiles(Boolean composeSmallFiles) {
+    this.composeSmallFiles = composeSmallFiles;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withCleanComposePartFiles(Boolean cleanComposePartFiles) {
+    this.cleanComposePartFiles = cleanComposePartFiles;
+    return this;
+  }
+
+  public WriteFormatToFileDestination<DataT> withComposeFunction(ComposeFunction<FileIO.Sink<DataT>> composeFunction) {
+    this.composeFunction = composeFunction;
+    return this;
+  }
+
   public static <DataT> WriteFormatToFileDestination<DataT> create() {
     return new WriteFormatToFileDestination<>();
   }
@@ -165,6 +195,11 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
 
   @Override
   public PDone expand(PCollection<DataT> input) {
+    if (composeSmallFiles && composeTempDirectory.isAccessible()) {
+      checkArgument(composeTempDirectory.get() != null,
+              "When composing files a temp location should be configured in option --composeTempDirectory");
+    }
+
     // create the naming strategy for created files
     WindowedFileNaming naming = new WindowedFileNaming(
             outputFilenamePrefix,
@@ -213,16 +248,44 @@ public class WriteFormatToFileDestination<DataT> extends PTransform<PCollection<
     // capture data to be ingested and send it to GCS (as final or temp yet to be determined)
     WriteFilesResult<Void> writtenFiles
             = dataToBeWritten
-                    .apply("WriteFiles",
+                    .apply(composeSmallFiles ? "WritePreComposeFiles" : "WriteFiles",
                             FileIO.<DataT>write()
                                     .via(sinkProvider.apply())
                                     .withTempDirectory(tempDirectory)
                                     // we will use the same naming for all writes (final or temps) to ease debugging (when needed)
                                     .withNaming(naming)
                                     .withNumShards(numShards)
-                                    .to(outputDirectory));
+                                    // in case we are composing the files we need to send the initial writes to a temp location
+                                    .to(composeSmallFiles
+                                            ? composeTempDirectory
+                                            : outputDirectory));
 
     PCollection<String> fileNames = null;
+
+    if (composeSmallFiles) {
+      // we create a compose files transform
+      ComposeFiles<Void, DataT> composeTransform
+              = ComposeFiles
+                      .<Void, DataT>create()
+                      .withFileNaming(naming)
+                      .withFilePrefix(outputFilenamePrefix)
+                      .withFileSuffix(outputFilenameSuffix)
+                      .withTempPath(tempDirectory)
+                      .withOutputPath(outputDirectory)
+                      .withComposeShards(composeShards)
+                      .withSinkProvider(sinkProvider)
+                      .withComposeFunction(composeFunction);
+
+      // check if we don't need to clean composing parts
+      if (!cleanComposePartFiles) {
+        composeTransform.withoutCleaningParts();
+      }
+
+      fileNames = writtenFiles
+              .getPerDestinationOutputFilenames()
+              .apply("RemoveDestinationKeys", Values.create())
+              .apply("ComposeSmallFiles", composeTransform);
+    }
 
     if (createSuccessFile) {
       // check if this has not being initialized

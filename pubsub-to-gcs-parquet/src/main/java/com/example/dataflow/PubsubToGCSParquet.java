@@ -148,7 +148,7 @@ public class PubsubToGCSParquet {
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
     
-    Preconditions.checkArgument(options.isFlatNamingStructure() ^ options.isHourlySuccessFiles(), 
+    Preconditions.checkArgument(!(options.isFlatNamingStructure() && options.isHourlySuccessFiles()), 
             "Flat filename and hourly filepath structure are mutually exclusive.");
     
     // read AVRO schema from local filesystem
