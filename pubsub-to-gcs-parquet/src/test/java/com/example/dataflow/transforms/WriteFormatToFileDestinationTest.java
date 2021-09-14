@@ -85,26 +85,32 @@ public class WriteFormatToFileDestinationTest {
     Assert.assertTrue(!resourceList.isEmpty());
     // there is a success file
     Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
-    // there are more files with data
-    Assert.assertTrue(resourceList.size() > 1);
+    // there are 2 files, 1 with data and the success file
+    Assert.assertTrue(resourceList.size() == 2);
   }
 
   private void setupPipeline(WriteFormatToFileDestination<GenericRecord> writeFormat) {
 
     String outputPath = temporaryFolder.getRoot().getAbsolutePath() + '/';
-    List<GenericRecord> records = ComposeFilesTest.generateGenericRecords(2);
+    List<GenericRecord> records = ComposeFilesTest.generateGenericRecords(100);
     AvroGenericCoder coder = AvroGenericCoder.of(ComposeFilesTest.SCHEMA);
     Instant baseTime = new Instant(0);
 
-    TestStream<GenericRecord> stream
+    TestStream.Builder<GenericRecord> streamBuilder
             = TestStream
                     .create(coder)
                     .advanceWatermarkTo(baseTime)
                     .addElements(TimestampedValue.of(records.get(0), Instant.now()))
-                    .advanceProcessingTime(Duration.standardSeconds(1L))
-                    .addElements(TimestampedValue.of(records.get(1), Instant.now()))
-                    .advanceProcessingTime(Duration.standardMinutes(1L))
-                    .advanceWatermarkToInfinity();
+                    .advanceProcessingTime(Duration.standardSeconds(1L));
+
+    for (int i = 1; i < 99; i++) {
+      streamBuilder.addElements(TimestampedValue.of(records.get(i), Instant.now()));
+    }
+
+    TestStream<GenericRecord> stream = streamBuilder
+            .addElements(TimestampedValue.of(records.get(99), Instant.now()))
+            .advanceProcessingTime(Duration.standardMinutes(1L))
+            .advanceWatermarkToInfinity();
 
     testPipeline.getCoderRegistry().registerCoderForType(TypeDescriptor.of(GenericRecord.class), coder);
 

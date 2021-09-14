@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
+import java.util.Objects;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
@@ -254,6 +255,28 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
         public void merge(FilenameAcc accu) {
           this.add(accu.filename);
+        }
+
+        @Override
+        public int hashCode() {
+          int hash = 7;
+          hash = 41 * hash + Objects.hashCode(this.filename);
+          return hash;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+          if (this == obj) {
+            return true;
+          }
+          if (obj == null) {
+            return false;
+          }
+          if (getClass() != obj.getClass()) {
+            return false;
+          }
+          final FilenameAcc other = (FilenameAcc) obj;
+          return Objects.equals(this.filename, other.filename);
         }
 
       }
