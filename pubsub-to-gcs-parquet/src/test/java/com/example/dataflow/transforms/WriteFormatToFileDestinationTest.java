@@ -4,6 +4,7 @@ import com.example.dataflow.PubsubToGCSParquet;
 import com.example.dataflow.utils.Utilities;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.Schema;
@@ -17,6 +18,8 @@ import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -39,7 +42,8 @@ public class WriteFormatToFileDestinationTest {
   public void testParquetWrite() throws IOException {
     setupPipeline(
             WriteFormatToFileDestination.<GenericRecord>create()
-                    .withNumShards(1));
+                    .withNumShards(1),
+            100);
 
     testPipeline.run().waitUntilFinish();
 
@@ -70,7 +74,8 @@ public class WriteFormatToFileDestinationTest {
                     .withComposeShards(1)
                     .withComposeSmallFiles(true)
                     .withComposeTempDirectory(ValueProvider.StaticValueProvider.of(outputPath + "temp/compose"))
-                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles));
+                    .withComposeFunction(PubsubToGCSParquet::composeParquetFiles),
+            100);
 
     testPipeline.run().waitUntilFinish();
 
@@ -85,14 +90,19 @@ public class WriteFormatToFileDestinationTest {
     Assert.assertTrue(!resourceList.isEmpty());
     // there is a success file
     Assert.assertTrue(resourceList.stream().anyMatch(f -> f.endsWith("SUCCESS")));
-    // there are 2 files, 1 with data and the success file
-    Assert.assertTrue(resourceList.size() == 2);
+    // there are at least 2 files, 1 with data and the success files (this depends on when the test is exec, it may generate 2 windows).
+    Assert.assertTrue(resourceList.size() >= 2);
+    // lets count that we are writing the expected number of rows in the parquet file
+    Assert.assertTrue(
+            checkNumRows(
+                    resourceList.stream().filter(f -> !f.endsWith("SUCCESS")).findFirst().get(),
+                    100));
   }
 
-  private void setupPipeline(WriteFormatToFileDestination<GenericRecord> writeFormat) {
+  private void setupPipeline(WriteFormatToFileDestination<GenericRecord> writeFormat, int avroRecords) {
 
     String outputPath = temporaryFolder.getRoot().getAbsolutePath() + '/';
-    List<GenericRecord> records = ComposeFilesTest.generateGenericRecords(100);
+    List<GenericRecord> records = ComposeFilesTest.generateGenericRecords(avroRecords);
     AvroGenericCoder coder = AvroGenericCoder.of(ComposeFilesTest.SCHEMA);
     Instant baseTime = new Instant(0);
 
@@ -104,7 +114,7 @@ public class WriteFormatToFileDestinationTest {
                     .advanceProcessingTime(Duration.standardSeconds(1L));
 
     for (int i = 1; i < 99; i++) {
-      streamBuilder.addElements(TimestampedValue.of(records.get(i), Instant.now()));
+      streamBuilder = streamBuilder.addElements(TimestampedValue.of(records.get(i), Instant.now()));
     }
 
     TestStream<GenericRecord> stream = streamBuilder
@@ -136,5 +146,19 @@ public class WriteFormatToFileDestinationTest {
                             .withSuccessFilesWindowDuration("5s")
                             // to avoid generating infinit long sequences for empty windows
                             .withTestingSeq());
+  }
+
+  private boolean checkNumRows(String filePath, int expectedRowCount) throws IOException {
+    int rowCount = 0;
+    try ( ParquetReader<GenericRecord> reader = AvroParquetReader.<GenericRecord>builder(
+            new PubsubToGCSParquet.BeamParquetInputFile(
+                    Files.newByteChannel(Paths.get(filePath)))).build();) {
+
+      GenericRecord nextRecord;
+      while ((nextRecord = reader.read()) != null) {
+        rowCount++;
+      }
+    }
+    return expectedRowCount == rowCount;
   }
 }

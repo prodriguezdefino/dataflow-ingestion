@@ -147,10 +147,10 @@ public class PubsubToGCSParquet {
   static PipelineResult run(PStoGCSParquetOptions options) throws IOException {
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
-    
-    Preconditions.checkArgument(!(options.isFlatNamingStructure() && options.isHourlySuccessFiles()), 
+
+    Preconditions.checkArgument(!(options.isFlatNamingStructure() && options.isHourlySuccessFiles()),
             "Flat filename and hourly filepath structure are mutually exclusive.");
-    
+
     // read AVRO schema from local filesystem
     final String avroSchemaStr = Files.readAllLines(Paths.get(options.getAvroSchemaFileLocation()))
             .stream()
@@ -263,11 +263,11 @@ public class PubsubToGCSParquet {
   /**
    * Beam related implementation of Parquet InputFile (copied from Beam SDK).
    */
-  static class BeamParquetInputFile implements InputFile {
+  public static class BeamParquetInputFile implements InputFile {
 
     private final SeekableByteChannel seekableByteChannel;
 
-    BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
+    public BeamParquetInputFile(SeekableByteChannel seekableByteChannel) {
       this.seekableByteChannel = seekableByteChannel;
     }
 
