@@ -199,7 +199,6 @@ public class GCSParquetToCSV {
     // values since our pipeline already finished (wait until finished)
     for (MetricResult<Long> counter : metrics.getCounters()) {
       LOG.info(counter.getName() + ":" + counter.getCommitted());
-      LOG.info(counter.getName() + ":" + counter.getAttempted());
     }
 
     exec.shutdownNow().stream().forEach(System.out::println);
@@ -247,7 +246,7 @@ public class GCSParquetToCSV {
       // We expect only one result here, and we are retrieving the attempted 
       // values since our pipeline is still running
       for (MetricResult<Long> counter : metrics.getCounters()) {
-        LOG.info(counter.getName() + ":" + counter.getAttempted());
+        LOG.info(counter.getName() + ":" + counter.getCommitted());
       }
     }
   }
