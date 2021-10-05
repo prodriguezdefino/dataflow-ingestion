@@ -4,7 +4,7 @@
   "balance": {{float(1000, 4000, "%.2f")}},
   "picture": "http://placehold.it/32x32",
   "age": {{integer(20, 40)}},
-  "eyeColor": "{{random("blue", "brown", "green")}}",
+  "eyeColor": "{{random("blue", "brown", "green", "black", "grey")}}",
   "name": "{{firstName()}} {{surname()}}",
   "gender": "{{gender()}}",
   "company": "{{company().toUpperCase()}}",
