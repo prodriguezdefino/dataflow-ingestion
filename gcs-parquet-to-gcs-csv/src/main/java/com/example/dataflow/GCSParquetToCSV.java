@@ -15,6 +15,7 @@
  */
 package com.example.dataflow;
 
+import com.example.dataflow.utils.MetricsReporter;
 import com.google.api.client.util.Joiner;
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -23,10 +24,6 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
@@ -124,7 +121,7 @@ public class GCSParquetToCSV {
    * @param args The command-line arguments to the pipeline.
    * @throws java.io.IOException
    */
-  public static void main(String[] args) throws IOException {
+  public static void main(String[] args) throws Exception {
 
     GCSParquetToCSVOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(GCSParquetToCSVOptions.class);
 
@@ -137,7 +134,7 @@ public class GCSParquetToCSV {
    * @param options The execution parameters to the pipeline.
    * @return The result of the pipeline execution.
    */
-  static PipelineResult run(GCSParquetToCSVOptions options) throws IOException {
+  static PipelineResult run(GCSParquetToCSVOptions options) throws IOException, Exception {
 
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
@@ -175,80 +172,32 @@ public class GCSParquetToCSV {
     PipelineResult result = pipeline.run();
 
     // launch the async metrics reporter
-    ExecutorService exec = Executors.newSingleThreadExecutor();
-    MetricsReporterCallable reporter = new MetricsReporterCallable(result);
-    exec.submit(reporter);
-    
-    // wait for the pipeline to finish
-    result.waitUntilFinish();
+    try ( MetricsReporter asyncReporter
+            = MetricsReporter.create(
+                    result, List.of(
+                            MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)));) {
+      // wait for the pipeline to finish
+      result.waitUntilFinish();
 
-    // stop the async reporter
-    reporter.stopCallable();
-    
-    // Request the metric called "records_processed" in namespace of our DoFn class "KVsFromEvent"
-    MetricQueryResults metrics
-            = result
-                    .metrics()
-                    .queryMetrics(
-                            MetricsFilter.builder()
-                                    .build());
+      // stop the async reporter
+      asyncReporter.stopReporter();
 
-    LOG.info("***** Printing Final Values for Custom Metrics (All of them) *****");
-
-    // We expect only one result here, and we are retrieving the committed 
-    // values since our pipeline already finished (wait until finished)
-    for (MetricResult<Long> counter : metrics.getCounters()) {
-      LOG.info(counter.getName() + ":" + counter.getCommitted());
-    }
-
-    exec.shutdownNow().stream().forEach(System.out::println);
-    
-    return result;
-  }
-
-  static class MetricsReporterCallable implements Callable<Void> {
-
-    private final PipelineResult result;
-    private Boolean keepGoing = true;
-
-    public MetricsReporterCallable(PipelineResult result) {
-      this.result = result;
-    }
-
-    @Override
-    public Void call() throws Exception {
-
-      while (keepGoing) {
-        retrieveAndPrintMetrics();
-        // wait 10 seconds for next report
-        Thread.sleep(10 * 1000);
-      }
-      return (Void) null;
-    }
-
-    public void stopCallable() {
-      this.keepGoing = false;
-    }
-
-    private void retrieveAndPrintMetrics() {
-      // Request the metric called "records_processed" in namespace of our DoFn class "KVsFromEvent"
+      // Request all the metrics available for the pipeline
       MetricQueryResults metrics
               = result
                       .metrics()
                       .queryMetrics(
                               MetricsFilter.builder()
-                                      .addNameFilter(
-                                              MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME))
                                       .build());
 
-      LOG.info("***** Printing Current Custom Metrics values (Specific Metric) *****");
 
-      // We expect only one result here, and we are retrieving the attempted 
-      // values since our pipeline is still running
+      // Lets print all the available metrics
+      LOG.info("***** Printing Final Values for Custom Metrics (All of them) *****");
       for (MetricResult<Long> counter : metrics.getCounters()) {
         LOG.info(counter.getName() + ":" + counter.getCommitted());
       }
     }
+    return result;
   }
 
   static class CSVSink implements FileIO.Sink<KV<String, String>> {
