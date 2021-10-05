@@ -30,6 +30,7 @@
     <module>common</module>
     <module>pubsub-to-gcs-parquet</module>
     <module>pubsub-to-bq</module>
+    <module>gcs-parquet-to-gcs-csv</module>
   </modules>
   
   <properties>
