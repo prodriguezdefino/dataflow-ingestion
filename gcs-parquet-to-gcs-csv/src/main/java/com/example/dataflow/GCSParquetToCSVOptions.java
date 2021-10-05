@@ -27,7 +27,7 @@ import org.apache.beam.sdk.options.ValueProvider;
  * <p>
  * Inherits standard configuration options.
  */
-public interface AvroToCSVOptions extends DataflowPipelineOptions {
+public interface GCSParquetToCSVOptions extends DataflowPipelineOptions {
 
   @Description("Input location for the AVRO files.")
   @Validation.Required
