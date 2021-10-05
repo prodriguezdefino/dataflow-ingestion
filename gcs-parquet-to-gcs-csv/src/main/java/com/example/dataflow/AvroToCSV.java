@@ -94,19 +94,17 @@ import org.slf4j.LoggerFactory;
  * --avroSchemaFileLocation='avro-schema.json' \
  * --stagingLocation=gs://$STAGING_BUCKET/dataflow/staging \
  * --tempLocation=gs://$STAGING_BUCKET/dataflow/temp \
- * --enableStreamingEngine \
  * --numWorkers=50 \
  * --maxNumWorkers=99 \
  * --runner=DataflowRunner \
  * --workerMachineType=n1-highmem-2 \
- * --windowDuration=5m \
- * --numStreamingKeys=2000 \
  * --usePublicIps=false \
  * --region=us-central1 \
- * --inputSubscription=$SUBSCRIPTION \
- * --outputTableSpec=$BQ_TABLE \
- * --jobName='nokill-rpablo-pstobqstreaming'"
- * </pre>
+ * --numShards=70 \
+ * --inputLocation=gs://$BUCKET/parquet/2021/10/04/17/*.parquet \
+ * --outputLocation=gs://$BUCKET/csv/ \
+ * --jobName='gcs-avro-to-csv' "
+  * </pre>
  */
 public class AvroToCSV {
 
