@@ -21,7 +21,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.example.dataflow</groupId>
-  <artifactId>dataflow-ingestion-gcs-parquet-to-gcs-csv</artifactId>
+  <artifactId>dataflow-ingestion-batch</artifactId>
   
   <parent>
     <groupId>com.example.dataflow</groupId>
