@@ -194,13 +194,18 @@ public class PubsubToGCSParquet {
    * @return the write instance
    */
   static WriteFormatToFileDestination<GenericRecord> createWriteFormatTransform(String avroSchemaStr, PStoGCSParquetOptions options) {
+    final Boolean compressionEnabled = options.isCompressionEnabled();
+    
     WriteFormatToFileDestination<GenericRecord> write
             = WriteFormatToFileDestination
                     .<GenericRecord>create()
                     .withSinkProvider(
                             () -> ParquetIO
                                     .sink(new Schema.Parser().parse(avroSchemaStr))
-                                    .withCompressionCodec(CompressionCodecName.SNAPPY))
+                                    .withCompressionCodec(
+                                            compressionEnabled ? 
+                                                    CompressionCodecName.SNAPPY : 
+                                                    CompressionCodecName.UNCOMPRESSED))
                     .withCoder(AvroCoder.of(new Schema.Parser().parse(avroSchemaStr)))
                     .withNumShards(options.getNumShards())
                     .withOutputDirectory(options.getOutputDirectory())

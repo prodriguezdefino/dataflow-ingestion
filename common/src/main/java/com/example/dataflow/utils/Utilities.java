@@ -66,8 +66,7 @@ public class Utilities {
             .replace("YYYY", YEAR.print(time))
             .replace("MM", MONTH.print(time))
             .replace("DD", DAY.print(time))
-            .replace("HH", HOUR.print(time))
-            .replace("mm", MINUTE.print(time));
+            .replace("HH", HOUR.print(time));
   }
 
   /**

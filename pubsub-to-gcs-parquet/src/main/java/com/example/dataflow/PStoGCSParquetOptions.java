@@ -140,5 +140,11 @@ public interface PStoGCSParquetOptions extends DataflowPipelineOptions {
   Boolean isFlatNamingStructure();
 
   void setFlatNamingStructure(Boolean value);
+  
+  @Description("Enables SNAPPY compression on Parquet files.")
+  @Default.Boolean(false)
+  Boolean isCompressionEnabled();
+
+  void setCompressionEnabled(Boolean value);
 
 }

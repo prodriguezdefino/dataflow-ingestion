@@ -74,7 +74,7 @@ public class WindowedFileNaming implements FileIO.Write.FileNaming {
             = Optional
                     .ofNullable(window)
                     .map(w -> w instanceof IntervalWindow ? (IntervalWindow) w : null)
-                    .map(w -> w.end().toDateTime())
+                    .map(w -> w.maxTimestamp().toDateTime())
                     .map(time -> buildOutputPrefixPath(time))
                     .orElse("");
 

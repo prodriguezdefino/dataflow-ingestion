@@ -207,6 +207,6 @@ public class CreateSuccessFileTest {
     Assert.assertTrue(resourceList.size() == 1);
     // the path of the success file should ends with the next hour
     Assert.assertTrue(resourceList.get(0).endsWith(
-            Instant.now().toDateTime().hourOfDay().addToCopy(1).hourOfDay().getAsText() + "/_SUCCESS"));
+            Instant.now().toDateTime().hourOfDay().getAsText() + "/_SUCCESS"));
   }
 }

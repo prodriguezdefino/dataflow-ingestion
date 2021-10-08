@@ -9,6 +9,7 @@
   "gender": "{{gender()}}",
   "company": "{{company().toUpperCase()}}",
   "email": "{{email()}}",
+  "email2": "{{email()}}",
   "phone": "+1 {{phone()}}",
   "address": "{{integer(100, 999)}} {{street()}}, {{city()}}, {{state()}}, {{integer(100, 10000)}}",
   "registered": {{timestamp()}},

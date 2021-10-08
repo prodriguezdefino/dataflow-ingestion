@@ -485,7 +485,7 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
 
           if (window instanceof IntervalWindow) {
             IntervalWindow intervalWindow = (IntervalWindow) window;
-            DateTime time = intervalWindow.end().toDateTime();
+            DateTime time = intervalWindow.maxTimestamp().toDateTime();
             // check for hourly windows 
             if (Hours.hoursBetween(intervalWindow.start(), intervalWindow.end()).getHours() == 1) {
               outputPath = outputPath + buildHourlyPartitionedPathFromDatetime(time);
@@ -495,7 +495,7 @@ public class CreateSuccessFiles extends PTransform<PCollectionTuple, PDone> {
             if (flatNamingStructure) {
               fileName = fileName
                       + "_" + buildFlatPathFromDateTime(intervalWindow.start().toDateTime())
-                      + "_" + buildFlatPathFromDateTime(intervalWindow.end().toDateTime());
+                      + "_" + buildFlatPathFromDateTime(intervalWindow.maxTimestamp().toDateTime());
             }
           } else {
             outputPath = outputPath + buildPartitionedPathFromDatetime(Instant.now().toDateTime());
