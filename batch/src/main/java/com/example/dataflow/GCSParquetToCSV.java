@@ -17,6 +17,7 @@ package com.example.dataflow;
 
 import com.example.dataflow.utils.MetricsReporter;
 import com.google.api.client.util.Joiner;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.channels.Channels;
@@ -29,9 +30,12 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.Compression;
+import org.apache.beam.sdk.io.DefaultFilenamePolicy;
+import org.apache.beam.sdk.io.FileBasedSink;
 import org.apache.beam.sdk.io.FileIO;
+import org.apache.beam.sdk.io.WriteFiles;
+import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
@@ -40,12 +44,15 @@ import org.apache.beam.sdk.metrics.MetricResult;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.metrics.MetricsFilter;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
+import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.DateTime;
 import org.joda.time.format.ISODateTimeFormat;
 import org.slf4j.Logger;
@@ -149,10 +156,12 @@ public class GCSParquetToCSV {
     final Schema avroSchema = new Schema.Parser().parse(avroSchemaStr);
     final List<String> colNames = avroSchema.getFields().stream().map(f -> f.name()).collect(Collectors.toList());
 
-    pipeline.apply("MatchParquetFiles", FileIO.match().filepattern(options.getInputLocation()))
-            .apply("ReadMatches", FileIO.readMatches())
-            .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
-            .apply("CategorizeOnEyeColor", ParDo.of(new KVsFromEvent()))
+    PCollection<KV<String, String>> categorized
+            = pipeline.apply("MatchParquetFiles", FileIO.match().filepattern(options.getInputLocation()))
+                    .apply("ReadMatches", FileIO.readMatches())
+                    .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
+                    .apply("CategorizeOnEyeColor", ParDo.of(new KVsFromEvent()));
+    /*categorized
             .apply("WriteToCSV",
                     FileIO.<String, KV<String, String>>writeDynamic()
                             // write to this output prefix
@@ -166,7 +175,11 @@ public class GCSParquetToCSV {
                             // needed since we are using a custom destination
                             .withDestinationCoder(StringUtf8Coder.of())
                             // force configured number of files per eye color (default 1)
-                            .withNumShards(options.getNumShards()));
+                            .withNumShards(options.getNumShards()));*/
+
+    categorized.apply(WriteFiles.to(
+            new CSVFileBasedSink(
+                    options.getTempLocation(), new CSVDynamicDestinations(options.getOutputLocation()))));
 
     // Execute the pipeline and return the result.
     PipelineResult result = pipeline.run();
@@ -189,7 +202,6 @@ public class GCSParquetToCSV {
                       .queryMetrics(
                               MetricsFilter.builder()
                                       .build());
-
 
       // Lets print all the available metrics
       LOG.info("***** Printing Final Values for Custom Metrics (All of them) *****");
@@ -223,6 +235,128 @@ public class GCSParquetToCSV {
     @Override
     public void flush() throws IOException {
       writer.flush();
+    }
+  }
+
+  static class CSVDynamicDestinations extends FileBasedSink.DynamicDestinations<KV<String, String>, String, String> {
+
+    private final ValueProvider<String> baseFilename;
+    private Boolean windowedWrites = false;
+
+    public CSVDynamicDestinations(ValueProvider<String> baseFilename) {
+      this.baseFilename = baseFilename;
+    }
+
+    @Override
+    public String formatRecord(KV<String, String> record) {
+      return record.getValue();
+    }
+
+    @Override
+    public String getDestination(KV<String, String> element) {
+      return element.getKey();
+    }
+
+    @Override
+    public String getDefaultDestination() {
+      return "output";
+    }
+
+    @Override
+    public FileBasedSink.FilenamePolicy getFilenamePolicy(String destination) {
+      return DefaultFilenamePolicy.fromStandardParameters(
+              ValueProvider.StaticValueProvider.of(
+                      FileBasedSink.convertToFileResourceIfPossible(baseFilename.get() + destination)),
+              null,
+              ".csv",
+              windowedWrites);
+    }
+
+  }
+
+  public static class CSVFileBasedSink extends FileBasedSink<KV<String, String>, String, String> {
+
+    private static final Logger logger = LoggerFactory.getLogger(CSVFileBasedSink.class);
+
+    public CSVFileBasedSink(String tempDirectory, DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+      super(ValueProvider.StaticValueProvider.of(convertToFileResourceIfPossible(tempDirectory)), dynamicDestinations);
+      logger.info("tmp directory is {}", this.getTempDirectoryProvider());
+    }
+
+    @Override
+    public WriteOperation<String, String> createWriteOperation() {
+      return new ExampleFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations());
+    }
+    // WriteOperation is used to managed the output file and finalized version of the files
+
+    private static class ExampleFileWriteOperation
+            extends WriteOperation<String, String> {
+
+      private final DynamicDestinations<KV<String, String>, String, String> dynamicDestinations;
+
+      public ExampleFileWriteOperation(
+              FileBasedSink<KV<String, String>, String, String> sink, 
+              ResourceId tempDirectory, 
+              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+        super(sink, tempDirectory);
+        this.dynamicDestinations = dynamicDestinations;
+      }
+
+      @Override
+      public Writer<String, String> createWriter() throws Exception {
+        return new ExampleFileWriter(this, dynamicDestinations);
+      }
+    }
+
+    private static class ExampleFileWriter extends Writer<String, String> {
+
+      private DataOutputStream dataOutputStream;
+      private Long rowCounter = 0L;
+
+      public ExampleFileWriter(
+              WriteOperation<String, String> writeOperation,
+              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+        super(writeOperation, MimeTypes.TEXT);
+        logger.info("Dynamic destination is: {}", dynamicDestinations);
+      }
+
+      @SuppressWarnings("deprecation") // uses internal test functionality.
+      @Override
+      protected void prepareWrite(WritableByteChannel channel) throws Exception {
+        // Have a way to inject the data with DataOutputStream
+        dataOutputStream = new DataOutputStream(Channels.newOutputStream(channel));
+        logger.info("Channel is: {}", channel);
+      }
+
+      @Override
+      public void write(String value) throws Exception {
+        // Some hack arounds
+        logger.info("Write value: {}", value);
+        String finalValue;
+        if (value == null) {
+          finalValue = "empty";
+        } else {
+          finalValue = value;
+        }
+        dataOutputStream.writeChars(finalValue.concat("\n"));
+        this.rowCounter++;
+      }
+
+      @Override
+      protected void finishWrite() throws Exception {
+        dataOutputStream.flush();
+        dataOutputStream.close();
+      }
+
+      @Override
+      protected void writeHeader() throws IOException {
+        this.dataOutputStream.writeChars("Row counter is: " + this.rowCounter);
+      }
+
+      @Override
+      protected void writeFooter() throws IOException {
+        this.dataOutputStream.writeChars("Footer counter is: " + this.rowCounter);
+      }
     }
   }
 
