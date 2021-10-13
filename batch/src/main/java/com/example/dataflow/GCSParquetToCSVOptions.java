@@ -53,4 +53,10 @@ public interface GCSParquetToCSVOptions extends DataflowPipelineOptions {
 
   void setOutputLocation(ValueProvider<String> value);
 
+  @Description("Use FileIO+Sink implementation, if false will use Custome FileBasedSink+WriteFiles")
+  @Default.Boolean(false)
+  Boolean isUseFileIO();
+
+  void setUseFileIO(Boolean value);
+
 }

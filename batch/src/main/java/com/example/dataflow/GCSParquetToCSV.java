@@ -30,6 +30,7 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.DefaultFilenamePolicy;
 import org.apache.beam.sdk.io.FileBasedSink;
@@ -161,25 +162,31 @@ public class GCSParquetToCSV {
                     .apply("ReadMatches", FileIO.readMatches())
                     .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
                     .apply("CategorizeOnEyeColor", ParDo.of(new KVsFromEvent()));
-    /*categorized
-            .apply("WriteToCSV",
-                    FileIO.<String, KV<String, String>>writeDynamic()
-                            // write to this output prefix
-                            .to(options.getOutputLocation())
-                            // using the key as the destination
-                            .by(kv -> kv.getKey())
-                            // with our custom sink 
-                            .via(new CSVSink(colNames))
-                            // with out custom filename pattern, per destination
-                            .withNaming(destinationKey -> new DestinationFileNaming(destinationKey))
-                            // needed since we are using a custom destination
-                            .withDestinationCoder(StringUtf8Coder.of())
-                            // force configured number of files per eye color (default 1)
-                            .withNumShards(options.getNumShards()));*/
 
-    categorized.apply(WriteFiles.to(
-            new CSVFileBasedSink(
-                    options.getTempLocation(), new CSVDynamicDestinations(options.getOutputLocation()))));
+    if (options.isUseFileIO()) {
+      categorized
+              .apply("WriteToCSV(FileIO.writeDynamic)",
+                      FileIO.<String, KV<String, String>>writeDynamic()
+                              // write to this output prefix
+                              .to(options.getOutputLocation())
+                              // using the key as the destination
+                              .by(kv -> kv.getKey())
+                              // with our custom sink 
+                              .via(new CSVSink(colNames))
+                              // with out custom filename pattern, per destination
+                              .withNaming(destinationKey -> new DestinationFileNaming(destinationKey))
+                              // needed since we are using a custom destination
+                              .withDestinationCoder(StringUtf8Coder.of())
+                              // force configured number of files per eye color (default 1)
+                              .withNumShards(options.getNumShards()));
+    } else {
+      categorized.apply("WriteToCSV(WriteFiles+FileBasedSink)",
+              WriteFiles.to(
+                      new CSVFileBasedSink(
+                              options.getTempLocation(), 
+                              new CSVDynamicDestinations(options.getOutputLocation()), 
+                              colNames)));
+    }
 
     // Execute the pipeline and return the result.
     PipelineResult result = pipeline.run();
@@ -278,33 +285,44 @@ public class GCSParquetToCSV {
 
     private static final Logger logger = LoggerFactory.getLogger(CSVFileBasedSink.class);
 
-    public CSVFileBasedSink(String tempDirectory, DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+    private final List<String> colNames;
+
+    public CSVFileBasedSink(
+            String tempDirectory,
+            DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
+            List<String> colNames) {
       super(ValueProvider.StaticValueProvider.of(convertToFileResourceIfPossible(tempDirectory)), dynamicDestinations);
+      this.colNames = colNames;
       logger.info("tmp directory is {}", this.getTempDirectoryProvider());
     }
 
     @Override
     public WriteOperation<String, String> createWriteOperation() {
-      return new ExampleFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations());
+      return new ExampleFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations(), colNames);
     }
     // WriteOperation is used to managed the output file and finalized version of the files
 
     private static class ExampleFileWriteOperation
             extends WriteOperation<String, String> {
 
+      private final List<String> colNames;
+
       private final DynamicDestinations<KV<String, String>, String, String> dynamicDestinations;
 
       public ExampleFileWriteOperation(
-              FileBasedSink<KV<String, String>, String, String> sink, 
-              ResourceId tempDirectory, 
-              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+              FileBasedSink<KV<String, String>, String, String> sink,
+              ResourceId tempDirectory,
+              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
+              List<String> colNames) {
         super(sink, tempDirectory);
         this.dynamicDestinations = dynamicDestinations;
+        this.colNames = colNames;
+
       }
 
       @Override
       public Writer<String, String> createWriter() throws Exception {
-        return new ExampleFileWriter(this, dynamicDestinations);
+        return new ExampleFileWriter(this, dynamicDestinations, colNames);
       }
     }
 
@@ -312,11 +330,15 @@ public class GCSParquetToCSV {
 
       private DataOutputStream dataOutputStream;
       private Long rowCounter = 0L;
+      private final List<String> colNames;
 
       public ExampleFileWriter(
               WriteOperation<String, String> writeOperation,
-              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations) {
+              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
+              List<String> colNames
+      ) {
         super(writeOperation, MimeTypes.TEXT);
+        this.colNames = colNames;
         logger.info("Dynamic destination is: {}", dynamicDestinations);
       }
 
@@ -325,13 +347,10 @@ public class GCSParquetToCSV {
       protected void prepareWrite(WritableByteChannel channel) throws Exception {
         // Have a way to inject the data with DataOutputStream
         dataOutputStream = new DataOutputStream(Channels.newOutputStream(channel));
-        logger.info("Channel is: {}", channel);
       }
 
       @Override
       public void write(String value) throws Exception {
-        // Some hack arounds
-        logger.info("Write value: {}", value);
         String finalValue;
         if (value == null) {
           finalValue = "empty";
@@ -350,12 +369,12 @@ public class GCSParquetToCSV {
 
       @Override
       protected void writeHeader() throws IOException {
-        this.dataOutputStream.writeChars("Row counter is: " + this.rowCounter);
+        this.dataOutputStream.writeChars(Joiner.on(',').join(colNames).concat("\n"));
       }
 
       @Override
       protected void writeFooter() throws IOException {
-        this.dataOutputStream.writeChars("Footer counter is: " + this.rowCounter);
+        this.dataOutputStream.writeChars("Footer counter is: " + this.rowCounter + "\n");
       }
     }
   }
