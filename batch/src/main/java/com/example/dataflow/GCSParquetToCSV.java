@@ -17,6 +17,8 @@ package com.example.dataflow;
 
 import com.example.dataflow.utils.MetricsReporter;
 import com.google.api.client.util.Joiner;
+import com.google.common.base.MoreObjects;
+import com.google.common.primitives.Bytes;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -26,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
@@ -35,7 +38,9 @@ import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.DefaultFilenamePolicy;
 import org.apache.beam.sdk.io.FileBasedSink;
 import org.apache.beam.sdk.io.FileIO;
+import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.WriteFiles;
+import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.metrics.Counter;
@@ -157,7 +162,7 @@ public class GCSParquetToCSV {
     final Schema avroSchema = new Schema.Parser().parse(avroSchemaStr);
     final List<String> colNames = avroSchema.getFields().stream().map(f -> f.name()).collect(Collectors.toList());
 
-    PCollection<KV<String, String>> categorized
+    PCollection<KV<String, KV<String, String>>> categorized
             = pipeline.apply("MatchParquetFiles", FileIO.match().filepattern(options.getInputLocation()))
                     .apply("ReadMatches", FileIO.readMatches())
                     .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
@@ -166,7 +171,7 @@ public class GCSParquetToCSV {
     if (options.isUseFileIO()) {
       categorized
               .apply("WriteToCSV(FileIO.writeDynamic)",
-                      FileIO.<String, KV<String, String>>writeDynamic()
+                      FileIO.<String, KV<String, KV<String, String>>>writeDynamic()
                               // write to this output prefix
                               .to(options.getOutputLocation())
                               // using the key as the destination
@@ -183,8 +188,8 @@ public class GCSParquetToCSV {
       categorized.apply("WriteToCSV(WriteFiles+FileBasedSink)",
               WriteFiles.to(
                       new CSVFileBasedSink(
-                              options.getTempLocation(), 
-                              new CSVDynamicDestinations(options.getOutputLocation()), 
+                              options.getTempLocation(),
+                              new CSVDynamicDestinations(options.getOutputLocation()),
                               colNames)));
     }
 
@@ -219,7 +224,7 @@ public class GCSParquetToCSV {
     return result;
   }
 
-  static class CSVSink implements FileIO.Sink<KV<String, String>> {
+  static class CSVSink implements FileIO.Sink<KV<String, KV<String, String>>> {
 
     private final String header;
     private PrintWriter writer;
@@ -235,8 +240,8 @@ public class GCSParquetToCSV {
     }
 
     @Override
-    public void write(KV<String, String> element) throws IOException {
-      writer.println(element.getValue());
+    public void write(KV<String, KV<String, String>> element) throws IOException {
+      writer.println(element.getValue().getValue());
     }
 
     @Override
@@ -245,7 +250,8 @@ public class GCSParquetToCSV {
     }
   }
 
-  static class CSVDynamicDestinations extends FileBasedSink.DynamicDestinations<KV<String, String>, String, String> {
+  static class CSVDynamicDestinations 
+          extends FileBasedSink.DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> {
 
     private final ValueProvider<String> baseFilename;
     private Boolean windowedWrites = false;
@@ -255,12 +261,12 @@ public class GCSParquetToCSV {
     }
 
     @Override
-    public String formatRecord(KV<String, String> record) {
+    public KV<String, String> formatRecord(KV<String, KV<String, String>> record) {
       return record.getValue();
     }
 
     @Override
-    public String getDestination(KV<String, String> element) {
+    public String getDestination(KV<String, KV<String, String>> element) {
       return element.getKey();
     }
 
@@ -281,7 +287,7 @@ public class GCSParquetToCSV {
 
   }
 
-  public static class CSVFileBasedSink extends FileBasedSink<KV<String, String>, String, String> {
+  public static class CSVFileBasedSink extends FileBasedSink<KV<String, KV<String, String>>, String, KV<String, String>> {
 
     private static final Logger logger = LoggerFactory.getLogger(CSVFileBasedSink.class);
 
@@ -289,54 +295,64 @@ public class GCSParquetToCSV {
 
     public CSVFileBasedSink(
             String tempDirectory,
-            DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
+            DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
             List<String> colNames) {
       super(ValueProvider.StaticValueProvider.of(convertToFileResourceIfPossible(tempDirectory)), dynamicDestinations);
       this.colNames = colNames;
       logger.info("tmp directory is {}", this.getTempDirectoryProvider());
     }
 
+    private WritableByteChannelFactory shareWritableByteChannelFactory() {
+      return getWritableByteChannelFactory();
+    }
+
     @Override
-    public WriteOperation<String, String> createWriteOperation() {
-      return new ExampleFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations(), colNames);
+    public WriteOperation<String, KV<String, String>> createWriteOperation() {
+      return new CSVFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations(), colNames);
     }
     // WriteOperation is used to managed the output file and finalized version of the files
 
-    private static class ExampleFileWriteOperation
-            extends WriteOperation<String, String> {
+    private static class CSVFileWriteOperation
+            extends WriteOperation<String, KV<String, String>> {
 
       private final List<String> colNames;
 
-      private final DynamicDestinations<KV<String, String>, String, String> dynamicDestinations;
+      private final DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations;
 
-      public ExampleFileWriteOperation(
-              FileBasedSink<KV<String, String>, String, String> sink,
+      public CSVFileWriteOperation(
+              CSVFileBasedSink sink,
               ResourceId tempDirectory,
-              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
+              DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
               List<String> colNames) {
         super(sink, tempDirectory);
         this.dynamicDestinations = dynamicDestinations;
         this.colNames = colNames;
-
       }
 
       @Override
-      public Writer<String, String> createWriter() throws Exception {
-        return new ExampleFileWriter(this, dynamicDestinations, colNames);
+      public Writer<String, KV<String, String>> createWriter() throws Exception {
+        return new CSVFileWriter(this, dynamicDestinations, colNames);
       }
     }
 
-    private static class ExampleFileWriter extends Writer<String, String> {
+    private static class CSVFileWriter extends Writer<String, KV<String, String>> {
 
+      private WritableByteChannel dataChannel;
+      private WritableByteChannel headerChannel;
+      private WritableByteChannel indexChannel;
+      private ResourceId headerResource;
+      private ResourceId indexResource;
       private DataOutputStream dataOutputStream;
+      private DataOutputStream headerOutputStream;
+      private DataOutputStream indexOutputStream;
       private Long rowCounter = 0L;
+      private Long indexSize = 0L;
       private final List<String> colNames;
 
-      public ExampleFileWriter(
-              WriteOperation<String, String> writeOperation,
-              DynamicDestinations<KV<String, String>, String, String> dynamicDestinations,
-              List<String> colNames
-      ) {
+      public CSVFileWriter(
+              WriteOperation<String, KV<String, String>> writeOperation,
+              DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
+              List<String> colNames) {
         super(writeOperation, MimeTypes.TEXT);
         this.colNames = colNames;
         logger.info("Dynamic destination is: {}", dynamicDestinations);
@@ -345,19 +361,59 @@ public class GCSParquetToCSV {
       @SuppressWarnings("deprecation") // uses internal test functionality.
       @Override
       protected void prepareWrite(WritableByteChannel channel) throws Exception {
+        // we will need this ref to close the channel before merging files
+        this.dataChannel = channel;
         // Have a way to inject the data with DataOutputStream
         dataOutputStream = new DataOutputStream(Channels.newOutputStream(channel));
+
+        // create temp files for header and index 
+        // for that we need to capture the directory and filename that is being created
+        ResourceId parentDir = getOutputFile().getCurrentDirectory();
+        headerResource = parentDir.resolve(
+                getOutputFile().getFilename() + ".header",
+                ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
+        headerChannel = createCompanionFileChannel(headerResource);
+        headerOutputStream = new DataOutputStream(Channels.newOutputStream(headerChannel));
+        // same for index file
+        indexResource = parentDir.resolve(
+                getOutputFile().getFilename() + ".index",
+                ResolveOptions.StandardResolveOptions.RESOLVE_FILE);
+        indexChannel = createCompanionFileChannel(indexResource);
+        indexOutputStream = new DataOutputStream(Channels.newOutputStream(indexChannel));
+      }
+
+      private WritableByteChannel createCompanionFileChannel(ResourceId headerResource) throws Exception {
+        WritableByteChannel channel = null;
+        // small ugliness
+        final WritableByteChannelFactory factory
+                = ((CSVFileBasedSink) getWriteOperation().getSink()).shareWritableByteChannelFactory();
+        // The factory may force a MIME type or it may return null, indicating to use the sink's MIME.
+        String channelMimeType = MoreObjects.firstNonNull(factory.getMimeType(), MimeTypes.TEXT);
+        WritableByteChannel tempChannel = FileSystems.create(headerResource, channelMimeType);
+        try {
+          channel = factory.create(tempChannel);
+        } catch (Exception e) {
+          // If we have opened the underlying channel but fail to open the compression channel,
+          // we should still close the underlying channel.
+          closeChannelAndThrow(tempChannel, headerResource, e);
+        }
+        return channel;
       }
 
       @Override
-      public void write(String value) throws Exception {
-        String finalValue;
+      public void write(KV<String, String> value) throws Exception {
+        String toBeWritten;
         if (value == null) {
-          finalValue = "empty";
+          toBeWritten
+                  = IntStream.range(0, colNames.size())
+                          .mapToObj(String::valueOf)
+                          .collect(Collectors.joining(","));
         } else {
-          finalValue = value;
+          toBeWritten = value.getValue();
         }
-        dataOutputStream.writeChars(finalValue.concat("\n"));
+        toBeWritten = toBeWritten.concat("\n");
+        updateIndex(dataOutputStream.size(), toBeWritten.getBytes("UTF-8").length, value.getKey());
+        dataOutputStream.writeChars(toBeWritten);
         this.rowCounter++;
       }
 
@@ -365,6 +421,24 @@ public class GCSParquetToCSV {
       protected void finishWrite() throws Exception {
         dataOutputStream.flush();
         dataOutputStream.close();
+        // also close the underlying channel, since we are going to operate on this file
+        dataChannel.close();
+        // also close the index companion file resources
+        indexOutputStream.flush();
+        indexOutputStream.close();
+        indexChannel.close();
+
+        // capture header data and write it to the file: index section start, data section start
+        //TODO
+        String headerContent = String.format("index section size: %d, data section row count: %d", indexSize, rowCounter);
+        
+        // we can now close the header resources as well
+        headerOutputStream.flush();
+        headerOutputStream.close();
+        headerChannel.close();
+        
+        // compose the files header first, index and data later.
+        //TODO
       }
 
       @Override
@@ -376,10 +450,28 @@ public class GCSParquetToCSV {
       protected void writeFooter() throws IOException {
         this.dataOutputStream.writeChars("Footer counter is: " + this.rowCounter + "\n");
       }
+
+      private void updateIndex(int size, int length, String key) {
+        //TODO: accumulate byte size and store per key location
+      }
+
+      // Helper function to close a channel, on exception cases.
+      // Always throws prior exception, with any new closing exception suppressed.
+      private static void closeChannelAndThrow(
+              WritableByteChannel channel, ResourceId filename, Exception prior) throws Exception {
+        try {
+          channel.close();
+        } catch (Exception e) {
+          LOG.error("Closing channel for {} failed.", filename, e);
+          prior.addSuppressed(e);
+        }
+        // We should fail here regardless of whether above channel.close() call failed or not.
+        throw prior;
+      }
     }
   }
 
-  static class KVsFromEvent extends DoFn<GenericRecord, KV<String, String>> {
+  static class KVsFromEvent extends DoFn<GenericRecord, KV<String, KV<String, String>>> {
 
     static final String RECORDS_PROCESSED_COUNTER_NAME = "records_processed";
     private static final Counter COUNTER = Metrics.counter(KVsFromEvent.class, RECORDS_PROCESSED_COUNTER_NAME);
@@ -396,7 +488,8 @@ public class GCSParquetToCSV {
               .map(r -> "\"" + r + "\"")
               .collect(Collectors.joining(","));
 
-      context.output(KV.of(gr.get("eyeColor").toString(), row));
+      // we create a KV with first key at the eye color and secondary key on the row id
+      context.output(KV.of(gr.get("eyeColor").toString(), KV.of(gr.get("id").toString(), row)));
     }
   }
 
