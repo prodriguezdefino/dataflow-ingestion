@@ -78,8 +78,8 @@ public class MetricsReporter implements AutoCloseable {
 
       while (keepGoing) {
         retrieveAndPrintMetrics();
-        // wait 10 seconds for next report
-        Thread.sleep(10 * 1000);
+        // wait 60 seconds for next report
+        Thread.sleep(60 * 1000);
       }
       return (Void) null;
     }

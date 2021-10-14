@@ -58,6 +58,12 @@
     </dependency>
     
     <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-storage</artifactId>
+      <version>1.118.0</version>
+    </dependency>
+    
+    <dependency>
       <groupId>com.example.dataflow</groupId>
       <artifactId>dataflow-ingestion-common</artifactId>
       <version>${project.version}</version>
