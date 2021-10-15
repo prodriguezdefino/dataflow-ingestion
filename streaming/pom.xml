@@ -21,7 +21,7 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.example.dataflow</groupId>
-  <artifactId>dataflow-ingestion-ps-to-bq</artifactId>
+  <artifactId>dataflow-ingestion-streaming</artifactId>
   
   <parent>
     <groupId>com.example.dataflow</groupId>
@@ -43,6 +43,18 @@
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-parquet</artifactId>
+    </dependency>
+    
+      <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-core -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-core</artifactId>
+      <version>1.2.1</version>
     </dependency>
     
     <dependency>

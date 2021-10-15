@@ -28,9 +28,8 @@
   
   <modules>
     <module>common</module>
-    <module>pubsub-to-gcs-parquet</module>
-    <module>pubsub-to-bq</module>
     <module>batch</module>
+    <module>streaming</module>
   </modules>
   
   <properties>
