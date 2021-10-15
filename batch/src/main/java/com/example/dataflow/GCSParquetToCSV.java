@@ -17,13 +17,11 @@ package com.example.dataflow;
 
 import com.example.dataflow.utils.MetricsReporter;
 import com.google.api.client.util.Joiner;
-import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.google.common.base.MoreObjects;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.channels.Channels;
@@ -32,7 +30,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
@@ -45,10 +42,10 @@ import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.WriteFiles;
 import org.apache.beam.sdk.io.fs.MoveOptions;
-import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
 import org.apache.beam.sdk.metrics.MetricResult;
@@ -65,6 +62,7 @@ import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.DateTime;
+import org.joda.time.Instant;
 import org.joda.time.format.ISODateTimeFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -191,11 +189,14 @@ public class GCSParquetToCSV {
                               .withNumShards(options.getNumShards()));
     } else {
       categorized.apply("WriteToCSV(WriteFiles+FileBasedSink)",
-              WriteFiles.to(
-                      new CSVPlusFileBasedSink(
+              WriteFiles
+                      .to(new CSVPlusFileBasedSink(
                               options.getTempLocation(),
                               new CSVPlusDynamicDestinations(options.getOutputLocation()),
-                              colNames)));
+                              colNames))
+                      .withNumShards(options.getNumShards())
+                      .withWindowedWrites()
+      );
     }
 
     // Execute the pipeline and return the result.
@@ -231,8 +232,11 @@ public class GCSParquetToCSV {
 
   static class CSVSink implements FileIO.Sink<KV<String, KV<String, String>>> {
 
+    private static final Distribution WRITE_DISTRO = Metrics.distribution(CSVSink.class, "write_ms");
+
     private final String header;
     private PrintWriter writer;
+    private long writeStartTS;
 
     public CSVSink(List<String> colNames) {
       this.header = Joiner.on(',').join(colNames);
@@ -241,6 +245,7 @@ public class GCSParquetToCSV {
     @Override
     public void open(WritableByteChannel channel) throws IOException {
       writer = new PrintWriter(Channels.newOutputStream(channel));
+      writeStartTS = Instant.now().getMillis();
       writer.println(header);
     }
 
@@ -252,6 +257,7 @@ public class GCSParquetToCSV {
     @Override
     public void flush() throws IOException {
       writer.flush();
+      WRITE_DISTRO.update(Instant.now().getMillis() - writeStartTS);
     }
   }
 
@@ -351,6 +357,10 @@ public class GCSParquetToCSV {
 
     private static class CSVPlusFileWriter extends Writer<String, KV<String, String>> {
 
+      private static final Distribution COMPOSE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "compose_ms");
+      private static final Distribution WRITE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "write_ms");
+      private static final Distribution DELETE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "delete_ms");
+
       private WritableByteChannel originalChannel;
       private WritableByteChannel dataChannel;
       private WritableByteChannel headerChannel;
@@ -358,11 +368,14 @@ public class GCSParquetToCSV {
       private ResourceId dataResource;
       private ResourceId headerResource;
       private ResourceId indexResource;
-      private DataOutputStream dataOutputStream;
-      private DataOutputStream headerOutputStream;
-      private DataOutputStream indexOutputStream;
+      private PrintWriter dataWriter;
+      private PrintWriter headerWriter;
+      private PrintWriter indexWriter;
       private Long rowCounter = 0L;
+      private Long dataBytesWritten = 0L;
+      private Long indexBytesWritten = 0L;
       private final List<String> colNames;
+      private Long writeStartTS;
 
       public CSVPlusFileWriter(
               WriteOperation<String, KV<String, String>> writeOperation,
@@ -378,23 +391,23 @@ public class GCSParquetToCSV {
         // we will need this ref to close the channel before merging files
         this.originalChannel = channel;
 
-        // Have a way to inject the data with DataOutputStream
-        //dataOutputStream = new DataOutputStream(Channels.newOutputStream(channel));
         // create temp files for header, data and index 
         // for that we need to capture the directory and filename that is being created
         headerResource = FileSystems.matchNewResource(getOutputFile().toString() + ".header", false);
         headerChannel = createCompanionFileChannel(headerResource);
-        headerOutputStream = new DataOutputStream(Channels.newOutputStream(headerChannel));
+        headerWriter = new PrintWriter(Channels.newOutputStream(headerChannel));
 
         // same for data file
         dataResource = FileSystems.matchNewResource(getOutputFile().toString() + ".data", false);
         dataChannel = createCompanionFileChannel(dataResource);
-        dataOutputStream = new DataOutputStream(Channels.newOutputStream(dataChannel));
+        dataWriter = new PrintWriter(Channels.newOutputStream(dataChannel));
 
         // same for index file
         indexResource = FileSystems.matchNewResource(getOutputFile().toString() + ".index", false);
         indexChannel = createCompanionFileChannel(indexResource);
-        indexOutputStream = new DataOutputStream(Channels.newOutputStream(indexChannel));
+        indexWriter = new PrintWriter(Channels.newOutputStream(indexChannel));
+
+        writeStartTS = Instant.now().getMillis();
       }
 
       private WritableByteChannel createCompanionFileChannel(ResourceId resource) throws Exception {
@@ -417,50 +430,43 @@ public class GCSParquetToCSV {
 
       @Override
       public void write(KV<String, String> value) throws Exception {
-        String toBeWritten;
-        if (value == null) {
-          toBeWritten
-                  = IntStream.range(0, colNames.size())
-                          .mapToObj(String::valueOf)
-                          .collect(Collectors.joining(","));
-        } else {
-          toBeWritten = value.getValue();
-          updateIndex(dataOutputStream.size(), value.getKey());
-        }
-        dataOutputStream.writeChars(toBeWritten.concat("\n"));
-        this.rowCounter++;
+        updateIndex(dataBytesWritten, value.getKey());
+        String toWrite = value.getValue().concat("\n");
+        dataWriter.print(toWrite);
+        dataBytesWritten += toWrite.getBytes("UTF-16BE").length;
+        rowCounter++;
       }
 
       @Override
       protected void finishWrite() throws Exception {
-        dataOutputStream.flush();
-        dataOutputStream.close();
-        dataChannel.close();
+        dataWriter.flush();
+        dataWriter.close();
 
         // also close the underlying channel, since we are going to operate on this file
         originalChannel.close();
+        WRITE_DISTRO.update(Instant.now().getMillis() - writeStartTS);
 
         LOG.info("temp output file: " + getOutputFile().toString());
 
         // also close the index companion file resources
-        indexOutputStream.writeChars("\n");
-        indexOutputStream.flush();
-        indexOutputStream.close();
-        indexChannel.close();
+        indexWriter.println();
+        indexWriter.flush();
+        indexWriter.close();
 
         // capture header data and write it to the file: index section start, data section start
         String headerFormat = "index section start: %15d, data section start: %15d\n";
         Integer headerContentSize = String.format(headerFormat, 0, 0).getBytes("UTF-16BE").length;
-        String headerContent = String.format(
-                headerFormat, headerContentSize + 1,
-                indexOutputStream.size() + headerContentSize + 1);
-        headerOutputStream.writeChars(headerContent);
+        String headerContent
+                = String.format(
+                        headerFormat, headerContentSize + 1,
+                        indexBytesWritten + headerContentSize + 1);
+        headerWriter.print(headerContent);
 
         // we can now close the header resources as well
-        headerOutputStream.flush();
-        headerOutputStream.close();
-        headerChannel.close();
+        headerWriter.flush();
+        headerWriter.close();
 
+        long startComposeTS = Instant.now().getMillis();
         // compose the files header first, index and data later.
         Storage storage = StorageOptions.getDefaultInstance().getService();
 
@@ -480,27 +486,33 @@ public class GCSParquetToCSV {
                         .build();
 
         storage.compose(composeRequest);
+        COMPOSE_DISTRO.update(Instant.now().getMillis() - startComposeTS);
 
+        long startDeleteTS = Instant.now().getMillis();
         // clean up files
         FileSystems
                 .delete(
                         List.of(headerResource, indexResource, dataResource),
                         MoveOptions.StandardMoveOptions.IGNORE_MISSING_FILES);
+        DELETE_DISTRO.update(Instant.now().getMillis() - startDeleteTS);
       }
 
       @Override
       protected void writeHeader() throws IOException {
-        this.dataOutputStream.writeChars(Joiner.on(',').join(colNames).concat("\n"));
+        String header = Joiner.on(',').join(colNames).concat("\n");
+        dataWriter.print(header);
+        dataBytesWritten += header.getBytes("UTF-16BE").length;
       }
 
       @Override
       protected void writeFooter() throws IOException {
-        this.dataOutputStream.writeChars("Footer counter is: " + this.rowCounter + "\n");
+        dataWriter.print("Row counter: " + this.rowCounter + ", bytes written: " + dataBytesWritten + "\n");
       }
 
-      private void updateIndex(int initByte, String key) throws IOException {
+      private void updateIndex(long initByte, String key) throws IOException {
         String indexContent = String.format("[%s:%d]", key, initByte);
-        indexOutputStream.writeChars(indexContent);
+        indexBytesWritten += indexContent.getBytes("UTF-16BE").length;
+        indexWriter.print(indexContent);
       }
 
       // Helper function to close a channel, on exception cases.
