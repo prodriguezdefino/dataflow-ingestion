@@ -31,3 +31,4 @@ check_*.sh
 !launch_datagen_templates.sh
 avro-schema-*.json
 *millwheel*
+/common/nbproject/

@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.beam.runners.dataflow.DataflowPipelineJob;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -205,8 +206,10 @@ public class GCSParquetToCSV {
     // launch the async metrics reporter
     try ( MetricsReporter asyncReporter
             = MetricsReporter.create(
-                    result, List.of(
-                            MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)));) {
+                    result,
+                    List.of(
+                            MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)),
+                    "CategorizeOnEyeColor.out0");) {
       // wait for the pipeline to finish
       result.waitUntilFinish();
 

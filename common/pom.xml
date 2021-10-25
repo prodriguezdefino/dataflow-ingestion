@@ -43,7 +43,24 @@
     <dependency>    
       <groupId>com.google.guava</groupId>
       <artifactId>guava</artifactId>
-    </dependency>    
+    </dependency>   
+
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java-util</artifactId>
+      <version>3.15.8</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+    </dependency>
+     
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-monitoring</artifactId>
+      <version>2.3.3</version>
+    </dependency> 
 
     <!-- Add slf4j API frontend binding with JUL backend -->
     <dependency>
