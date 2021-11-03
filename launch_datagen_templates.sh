@@ -13,7 +13,7 @@ gsutil cp $SCHEMA_FILENAME $SCHEMA_LOCATION
 
 for REGION in "${REGIONS[@]}";
   do
-    gcloud beta dataflow flex-template run $PREFIX_NAME-pubsub-json-datagen-$REGION --project=$PROJECT --region=$REGION --template-file-gcs-location=gs://dataflow-templates/latest/flex/Streaming_Data_Generator --parameters schemaLocation=$SCHEMA_LOCATION,qps=$QPS,topic=$TOPIC,maxNumWorkers=50,enableStreamingEngine=true
+    gcloud beta dataflow flex-template run $PREFIX_NAME-pubsub-json-datagen-$REGION --project=$PROJECT --region=$REGION --template-file-gcs-location=gs://dataflow-templates/latest/flex/Streaming_Data_Generator --parameters schemaLocation=$SCHEMA_LOCATION,qps=$QPS,topic=$TOPIC,maxNumWorkers=50,enableStreamingEngine=true,usePublicIps=false
   done
 
 echo ""

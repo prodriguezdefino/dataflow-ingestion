@@ -28,11 +28,11 @@ import java.nio.channels.Channels;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.beam.runners.dataflow.DataflowPipelineJob;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -207,7 +207,7 @@ public class GCSParquetToCSV {
     try ( MetricsReporter asyncReporter
             = MetricsReporter.create(
                     result,
-                    List.of(
+                    Arrays.asList(
                             MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)),
                     "CategorizeOnEyeColor.out0");) {
       // wait for the pipeline to finish
@@ -495,7 +495,7 @@ public class GCSParquetToCSV {
         // clean up files
         FileSystems
                 .delete(
-                        List.of(headerResource, indexResource, dataResource),
+                        Arrays.asList(headerResource, indexResource, dataResource),
                         MoveOptions.StandardMoveOptions.IGNORE_MISSING_FILES);
         DELETE_DISTRO.update(Instant.now().getMillis() - startDeleteTS);
       }
