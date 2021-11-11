@@ -16,6 +16,7 @@
 package com.example.dataflow.utils;
 
 import com.google.cloud.monitoring.v3.MetricServiceClient;
+import com.google.cloud.monitoring.v3.MetricServiceSettings;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.monitoring.v3.Aggregation;
 import com.google.monitoring.v3.ListTimeSeriesRequest;
@@ -38,7 +39,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.google.protobuf.util.Timestamps;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import org.apache.beam.runners.dataflow.DataflowPipelineJob;
+import org.apache.beam.sdk.values.KV;
 
 /**
  *
@@ -84,13 +87,6 @@ public class MetricsReporter implements AutoCloseable {
 
   static class MetricsReporterCallable implements Callable<Void> {
 
-    // wait 3 mins for next report
-    private static final int REPORT_FREQ_MILLIS = 3 * 60 * 1000;
-    private static final String PCOLLECTION_METRIC_ELEMCOUNT = "metric.type=\"dataflow.googleapis.com/job/element_count\" ";
-    private static final String PCOLLECTION_METRIC_BYTECOUNT = "metric.type=\"dataflow.googleapis.com/job/estimated_byte_count\" ";
-    private static final String JOB_FILTER_STRING = "resource.type=\"dataflow_job\" metric.label.\"job_id\"=\"%s\"";
-    private static final String PCOLLECTION_FILTER_STRING = " metric.label.\"pcollection\"=\"%s\"";
-
     private final DataflowPipelineJob result;
     private final Optional<List<MetricNameFilter>> nameFilters;
     private final Optional<String> pcolName;
@@ -126,123 +122,30 @@ public class MetricsReporter implements AutoCloseable {
       this.metricServiceClient.close();
     }
 
-    private void retrieveAndPrintMetrics() {
+    private void retrieveAndPrintMetrics() throws IOException {
       retrieveAndPrintCustomDataflowMetrics();
       retrieveAndPrintPCollectionMetrics();
     }
 
-    private void retrieveAndPrintPCollectionMetrics() {
-      retrieveAndPrintPCollectionMetrics(metricServiceClient, projectId, jobId, pcolName, REPORT_FREQ_MILLIS);
+    private void retrieveAndPrintPCollectionMetrics() throws IOException {
+      retrieveAndPrintPCollectionMetrics(metricServiceClient, result, pcolName, REPORT_FREQ_MILLIS);
     }
 
     @VisibleForTesting
     static void retrieveAndPrintPCollectionMetrics(
             MetricServiceClient metricsServiceClient,
-            String projectId,
-            String jobId,
+            PipelineResult result,
             Optional<String> pcolName,
-            Integer lastFreqReportedMs) {
+            Integer lastFreqReportedMs) throws IOException {
 
-      String pColFilter = pcolName
-              .map(pcName -> String.format(PCOLLECTION_FILTER_STRING, pcName))
-              .orElse("");
-
-      String elemCountFilter = String.format(PCOLLECTION_METRIC_ELEMCOUNT + JOB_FILTER_STRING + pColFilter, jobId);
-      retrieveAndPrintPCollectionMetrics(
-              metricsServiceClient,
-              "PCollection Element Count",
-              projectId,
-              elemCountFilter,
-              lastFreqReportedMs);
-
-      String byteCountFilter = String.format(PCOLLECTION_METRIC_BYTECOUNT + JOB_FILTER_STRING + pColFilter, jobId);
-      retrieveAndPrintPCollectionMetrics(
-              metricsServiceClient,
-              "PCollection Estimated Byte Count",
-              projectId,
-              byteCountFilter,
-              lastFreqReportedMs);
-    }
-
-    static void retrieveAndPrintPCollectionMetrics(
-            MetricServiceClient metricsServiceClient,
-            String metricName,
-            String projectId,
-            String filter,
-            Integer lastFreqReportedMs) {
-      try {
-
-        ProjectName projectName = ProjectName.of(projectId);
-        long startMillis = System.currentTimeMillis() - lastFreqReportedMs;
-        TimeInterval interval
-                = TimeInterval.newBuilder()
-                        .setStartTime(Timestamps.fromMillis(startMillis))
-                        .setEndTime(Timestamps.fromMillis(System.currentTimeMillis()))
-                        .build();
-
-        // Prepares the list time series request
-        ListTimeSeriesRequest request
-                = ListTimeSeriesRequest.newBuilder()
-                        .setName(projectName.toString())
-                        .setFilter(filter)
-                        .setInterval(interval)
-                        .setAggregation(
-                                Aggregation.newBuilder()
-                                        .setAlignmentPeriod(Duration.newBuilder().setSeconds(60).build())
-                                        .setPerSeriesAligner(Aggregation.Aligner.ALIGN_MEAN)
-                                        .setCrossSeriesReducer(Aggregation.Reducer.REDUCE_NONE)
-                                        .build())
-                        .setSecondaryAggregation(
-                                Aggregation.newBuilder()
-                                        .setAlignmentPeriod(Duration.newBuilder().setSeconds(60).build())
-                                        .setCrossSeriesReducer(Aggregation.Reducer.REDUCE_NONE)
-                                        .build())
-                        .build();
-
-        // Send the request to list the time series
-        MetricServiceClient.ListTimeSeriesPagedResponse response
-                = metricsServiceClient.listTimeSeries(request);
-
-        // Process the response
-        LOG.info("\n************* {} *************: ", metricName);
-        response
-                .iterateAll()
-                .forEach(
-                        timeSeries -> {
-                          List<Point> points = timeSeries
-                                  .getPointsList()
-                                  .stream()
-                                  .sorted((Point o1, Point o2) -> {
-                                    if (o1.getInterval().getEndTime().getSeconds() == o2.getInterval().getEndTime().getSeconds()) {
-                                      return 0;
-                                    } else if (o1.getInterval().getEndTime().getSeconds() < o2.getInterval().getEndTime().getSeconds()) {
-                                      return 1;
-                                    } else {
-                                      return -1;
-                                    }
-                                  }).collect(Collectors.toList());
-
-                          String labels = timeSeries
-                                  .getMetric()
-                                  .getLabelsMap()
-                                  .entrySet()
-                                  .stream()
-                                  .map(entry -> String.format("\tLabel: %s, value: %s", entry.getKey(), entry.getValue()))
-                                  .collect(Collectors.joining("\n"));
-
-                          String value = String.format("Value: %d",
-                                  points
-                                          .stream()
-                                          .findFirst()
-                                          .map(point -> point.getValue().getDoubleValue())
-                                          .map(d -> d.longValue())
-                                          .orElse(Long.MIN_VALUE));
-                          LOG.info("Filter:\n{}\n{}", labels, value);
-                          //OG.info("All data " + timeSeries.toString());
-                        });
-      } catch (Exception e) {
-        LOG.error("Error collecting metrics", e);
-      }
+      LOG.info("PCollection Element Counts Metrics");
+      retrieveAllFinalPCollectionElementCountMetric(result)
+              .forEach(elem
+                      -> LOG.info(String.format("%s - value: %d", elem.getKey(), elem.getValue())));
+      LOG.info("PCollection Estimated Byte Counts Metrics");
+      retrieveAllFinalPCollectionEstimateBytesMetric(result)
+              .forEach(elem
+                      -> LOG.info(String.format("%s - value: %d", elem.getKey(), elem.getValue())));
     }
 
     private void retrieveAndPrintCustomDataflowMetrics() {
@@ -266,4 +169,226 @@ public class MetricsReporter implements AutoCloseable {
       }
     }
   }
+
+  // wait 3 mins for next report
+  static final int REPORT_FREQ_MILLIS = 3 * 60 * 1000;
+  static final String PCOLLECTION_METRIC_ELEMCOUNT = "metric.type=\"dataflow.googleapis.com/job/element_count\" ";
+  static final String PCOLLECTION_METRIC_BYTECOUNT = "metric.type=\"dataflow.googleapis.com/job/estimated_byte_count\" ";
+  static final String JOB_FILTER_STRING = "resource.type=\"dataflow_job\" metric.label.\"job_id\"=\"%s\" ";
+  static final String PCOLLECTION_FILTER_STRING = " metric.label.\"pcollection\"=\"%s\"";
+  static final String PCOLLECTION_LABEL = "pcollection";
+  static final String METRIC_NA = "NA";
+
+  /**
+   * Returns the element count for all the PCollections reported by the job.
+   *
+   * @param jobInfo The pipeline result object that represents the job.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveAllFinalPCollectionElementCountMetric(
+          PipelineResult jobInfo
+  ) throws IOException {
+    DataflowPipelineJob dfJobInfo = (DataflowPipelineJob) jobInfo;
+    return retrieveAllFinalPCollectionElementCountMetric(dfJobInfo.getProjectId(), dfJobInfo.getJobId());
+  }
+
+  /**
+   * Returns the element count for all the PCollections reported by the job.
+   *
+   * @param jobInfo The pipeline result object that represents the job.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveAllFinalPCollectionElementCountMetric(
+          String projectId,
+          String jobId
+  ) throws IOException {
+    String filter = String.format(JOB_FILTER_STRING, jobId)
+            + PCOLLECTION_METRIC_ELEMCOUNT;
+    return retrievePCollectionMetrics(
+            projectId, MetricServiceClient.create(), filter, REPORT_FREQ_MILLIS);
+  }
+
+  /**
+   * Returns the output byte counts for all the PCollections reported by the job. Since this metrics is reported less frequently data may
+   * take longer to appear as a metric point.
+   *
+   * @param jobInfo The pipeline result object that represents the job.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveAllFinalPCollectionEstimateBytesMetric(
+          PipelineResult jobInfo
+  ) throws IOException {
+    DataflowPipelineJob dfJobInfo = (DataflowPipelineJob) jobInfo;
+    return retrieveAllFinalPCollectionEstimateBytesMetric(dfJobInfo.getProjectId(), dfJobInfo.getJobId());
+  }
+
+  /**
+   * Returns the output byte counts for all the PCollections reported by the job. Since this metrics is reported less frequently data may
+   * take longer to appear as a metric point.
+   *
+   * @param projectId GCP project id.
+   * @param jobId Dataflow job id.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveAllFinalPCollectionEstimateBytesMetric(
+          String projectId,
+          String jobId
+  ) throws IOException {
+    String filter = String.format(JOB_FILTER_STRING, jobId)
+            + PCOLLECTION_METRIC_BYTECOUNT;
+    return retrievePCollectionMetrics(
+            projectId, MetricServiceClient.create(), filter, REPORT_FREQ_MILLIS);
+  }
+
+  /**
+   * Returns the output byte count for the specified PCollection (if exists) reported by the job.
+   *
+   * @param jobInfo The pipeline result object that represents the job.
+   * @param pCollectionName The PCollection's name.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveFinalPCollectionEstimateBytesMetric(
+          PipelineResult jobInfo,
+          String pCollectionName
+  ) throws IOException {
+    DataflowPipelineJob dfJobInfo = (DataflowPipelineJob) jobInfo;
+    return retrieveFinalPCollectionEstimateBytesMetric(dfJobInfo.getProjectId(), dfJobInfo.getJobId(), pCollectionName);
+  }
+
+  /**
+   * Returns the output byte count for the specified PCollection (if exists) reported by the job.
+   *
+   * @param projectId GCP project id.
+   * @param jobId Dataflow job id.
+   * @param pCollectionName The PCollection's name.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveFinalPCollectionEstimateBytesMetric(
+          String projectId,
+          String jobId,
+          String pCollectionName
+  ) throws IOException {
+    String filter = String.format(JOB_FILTER_STRING, jobId)
+            + PCOLLECTION_METRIC_BYTECOUNT
+            + String.format(PCOLLECTION_FILTER_STRING, pCollectionName);
+    return retrievePCollectionMetrics(
+            projectId, MetricServiceClient.create(), filter, REPORT_FREQ_MILLIS);
+  }
+
+  /**
+   * Returns the element count for the specified PCollection (if exists) reported by the job.
+   *
+   * @param jobInfo The pipeline result object that represents the job.
+   * @param pCollectionName The PCollection's name.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveFinalPCollectionElementCountMetric(
+          PipelineResult jobInfo,
+          String pCollectionName
+  ) throws IOException {
+    DataflowPipelineJob dfJobInfo = (DataflowPipelineJob) jobInfo;
+    return retrieveFinalPCollectionElementCountMetric(dfJobInfo.getProjectId(), dfJobInfo.getJobId(), pCollectionName);
+  }
+
+  /**
+   * Returns the element count for the specified PCollection (if exists) reported by the job.
+   *
+   * @param projectId GCP project id.
+   * @param jobId Dataflow job id.
+   * @param pCollectionName The PCollection's name.
+   * @return A list of labels and values for the reported metrics.
+   * @throws IOException In case the creation of the metrics client fails.
+   */
+  static List<KV<String, Long>> retrieveFinalPCollectionElementCountMetric(
+          String projectId,
+          String jobId,
+          String pCollectionName
+  ) throws IOException {
+    String filter = String.format(JOB_FILTER_STRING, jobId)
+            + PCOLLECTION_METRIC_ELEMCOUNT
+            + String.format(PCOLLECTION_FILTER_STRING, pCollectionName);
+    return retrievePCollectionMetrics(
+            projectId, MetricServiceClient.create(), filter, REPORT_FREQ_MILLIS);
+  }
+
+  /**
+   * Retrieves reported PCollection metrics for the job.
+   *
+   * @param jobInfo The pipeline result object for the job
+   * @param metricServiceClient an instance of the metric service client
+   * @param filter a string filter for the metric service query
+   * @param lastFreqReportedMs the time in ms to consider for the request
+   * @return a list of KV containing the label of the metric (PCollection name) and the value of the returned metric (based on the filter).
+   */
+  static List<KV<String, Long>> retrievePCollectionMetrics(
+          String projectId,
+          MetricServiceClient metricServiceClient,
+          String filter,
+          Integer lastFreqReportedMs) {
+
+    ProjectName projectName = ProjectName.of(projectId);
+    long startMillis = System.currentTimeMillis() - lastFreqReportedMs;
+    TimeInterval interval
+            = TimeInterval.newBuilder()
+                    .setStartTime(Timestamps.fromMillis(startMillis))
+                    .setEndTime(Timestamps.fromMillis(System.currentTimeMillis()))
+                    .build();
+
+    // Prepares the list time series request
+    ListTimeSeriesRequest request
+            = ListTimeSeriesRequest.newBuilder()
+                    .setName(projectName.toString())
+                    .setFilter(filter)
+                    .setInterval(interval)
+                    .setAggregation(
+                            Aggregation.newBuilder()
+                                    .setAlignmentPeriod(Duration.newBuilder().setSeconds(60).build())
+                                    .setPerSeriesAligner(Aggregation.Aligner.ALIGN_MEAN)
+                                    .setCrossSeriesReducer(Aggregation.Reducer.REDUCE_NONE)
+                                    .build())
+                    .build();
+
+    // Send the request to list the time series
+    MetricServiceClient.ListTimeSeriesPagedResponse response
+            = metricServiceClient.listTimeSeries(request);
+
+    // Process the response
+    return StreamSupport
+            .stream(response.iterateAll().spliterator(), false)
+            .map(
+                    timeSeries -> {
+                      Long value = timeSeries
+                              .getPointsList()
+                              .stream()
+                              .min((Point o1, Point o2)
+                                      -> Long.compare(
+                                      o2.getInterval().getEndTime().getSeconds(),
+                                      o1.getInterval().getEndTime().getSeconds()))
+                              .map(point -> point.getValue().getDoubleValue())
+                              .map(Double::longValue)
+                              .orElse(Long.MIN_VALUE);
+
+                      String labels = timeSeries
+                              .getMetric()
+                              .getLabelsMap()
+                              .entrySet()
+                              .stream()
+                              .filter(entry -> PCOLLECTION_LABEL.equals(entry.getKey()))
+                              .map(entry
+                                      -> String.format("\tLabel: %s - %s", entry.getKey(), entry.getValue()))
+                              .findFirst()
+                              .orElse(METRIC_NA);
+
+                      return KV.of(labels, value);
+                    })
+            .collect(Collectors.toList());
+  }
+
 }
