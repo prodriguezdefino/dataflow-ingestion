@@ -19,6 +19,8 @@ import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.QueryJobConfiguration;
 import java.util.Arrays;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.format.DateTimeFormatterBuilder;
@@ -26,14 +28,15 @@ import org.joda.time.format.DateTimeFormatterBuilder;
 public class BQSegmentCountChecker {
 
   static public void main(String[] args) throws InterruptedException {
-    var tableSpec = Arrays.asList(args).stream()
+    Supplier<Stream<String>> argsStream = () -> Arrays.asList(args).stream();
+    var tableSpec = argsStream.get()
             .findFirst()
             .orElseThrow(() -> new IllegalArgumentException("Expecting a BQ table spec project.dataset.table"));
-    var segmentStartStr = Arrays.asList(args).stream()
+    var segmentStartStr = argsStream.get()
             .skip(1)
             .findFirst()
             .orElseThrow(() -> new IllegalArgumentException("Expecting a quoted datetime, '2021-12-07 22:00:00'"));
-    var minCheckPeriodMs = Arrays.asList(args).stream()
+    var minCheckPeriodMs = argsStream.get()
             .skip(2)
             .findFirst()
             .map(Integer::parseInt)
