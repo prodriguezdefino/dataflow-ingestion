@@ -18,6 +18,7 @@ package com.example.dataflow;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.QueryJobConfiguration;
+import java.util.Arrays;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.format.DateTimeFormatterBuilder;
@@ -25,8 +26,18 @@ import org.joda.time.format.DateTimeFormatterBuilder;
 public class BQSegmentCountChecker {
 
   static public void main(String[] args) throws InterruptedException {
-    var tableSpec = "pabs-pso-lab.loadtest.events_1ksize";
-    var segmentStartStr = "2021-12-07 23:55:00";
+    var tableSpec = Arrays.asList(args).stream()
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Expecting a BQ table spec project.dataset.table"));
+    var segmentStartStr = Arrays.asList(args).stream()
+            .skip(1)
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Expecting a quoted datetime, '2021-12-07 22:00:00'"));
+    var minCheckPeriodMs = Arrays.asList(args).stream()
+            .skip(2)
+            .findFirst()
+            .map(Integer::parseInt)
+            .orElse(1 * 1000);
 
     var dateFormatter = new DateTimeFormatterBuilder()
             .appendYear(4, 4)
@@ -79,8 +90,8 @@ public class BQSegmentCountChecker {
                 }
                 System.out.printf(message + ", partition's element count %d.\n", r.get(0).getLongValue());
               });
-      
-      Thread.sleep(1 * 1000);
+
+      Thread.sleep(minCheckPeriodMs);
     }
   }
 }
