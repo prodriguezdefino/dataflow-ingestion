@@ -15,8 +15,13 @@
  */
 package com.example.dataflow.utils;
 
+import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.services.dataflow.Dataflow;
+import com.google.api.services.dataflow.model.Job;
+import com.google.auth.http.HttpCredentialsAdapter;
+import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.monitoring.v3.MetricServiceClient;
-import com.google.cloud.monitoring.v3.MetricServiceSettings;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.monitoring.v3.Aggregation;
 import com.google.monitoring.v3.ListTimeSeriesRequest;
@@ -42,6 +47,9 @@ import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import org.apache.beam.runners.dataflow.DataflowPipelineJob;
 import org.apache.beam.sdk.values.KV;
+import org.joda.time.DateTime;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
 
 /**
  *
@@ -168,6 +176,38 @@ public class MetricsReporter implements AutoCloseable {
         LOG.info(counter.getName() + ":" + counter.getCommitted());
       }
     }
+  }
+  
+  /**
+   * Retrieves the execution time for the current state of the job.
+   * @param dataflowService an instance of the dataflow service client.
+   * @param projectId the project identifier.
+   * @param jobId the job identifier.
+   * @return the execution time since start to the current job's state.
+   * @throws IOException
+   */
+  static Long getJobExecutionTimeInMillis(Dataflow dataflowService,
+                                          String projectId, String jobId) throws IOException {
+    DateTimeFormatter dateFormatter = ISODateTimeFormat.dateTime();
+
+    Dataflow.Projects.Jobs.Get request = dataflowService.projects().jobs().get(projectId, jobId);
+    Job job = request.execute();
+    DateTime startDateTime = dateFormatter.parseDateTime(job.getStartTime());
+    DateTime currentStateDateTime = dateFormatter.parseDateTime(job.getCurrentStateTime());
+    return currentStateDateTime.getMillis() - startDateTime.getMillis();
+  }
+
+  /**
+   * Retrieves the execution time for the current state of the job.
+   * @param dataflowService an instance of the dataflow service client.
+   * @param result the pipeline result object (must be a DataflowPipelineJob instance).
+   * @return the execution time since start to the current job's state.
+   * @throws IOException
+   */
+  static Long getJobExecutionTimeInMillis(Dataflow dataflowService,
+                                          PipelineResult result) throws IOException {
+    DataflowPipelineJob dfJob = (DataflowPipelineJob) result;
+    return getJobExecutionTimeInMillis(dataflowService, dfJob.getProjectId(), dfJob.getJobId());
   }
 
   // wait 3 mins for next report
@@ -390,5 +430,5 @@ public class MetricsReporter implements AutoCloseable {
                     })
             .collect(Collectors.toList());
   }
-
+  
 }

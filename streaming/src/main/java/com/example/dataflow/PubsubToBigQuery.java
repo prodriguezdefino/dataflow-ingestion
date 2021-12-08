@@ -19,12 +19,14 @@ import com.example.dataflow.transforms.ProcessBQStreamingInsertErrors;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
+import com.google.api.services.bigquery.model.TimePartitioning;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.JsonProperties;
@@ -169,12 +171,12 @@ public class PubsubToBigQuery {
             = record -> BigQueryUtils.toTableRow(AvroUtils.toBeamRowStrict(record, null));
 
     if (options.isIncludeInsertTimestamp()) {
-      bqSchema
-              = bqSchema.set(BQ_INSERT_TIMESTAMP_FIELDNAME,
-                      new TableFieldSchema()
-                              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                              .setType("TIMESTAMP")
-                              .setMode("NULLABLE"));
+      List<TableFieldSchema> fields = new ArrayList<>(bqSchema.getFields());
+      fields.add(new TableFieldSchema()
+              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
+              .setType("TIMESTAMP")
+              .setMode("NULLABLE"));
+      bqSchema = bqSchema.setFields(fields);
 
       bqFormatFunction = record -> {
         Row beamRow = AvroUtils.toBeamRowStrict(record, null);
@@ -229,20 +231,30 @@ public class PubsubToBigQuery {
                               .withNumFileShards(10));
 
     } else {
+      BigQueryIO.Write<GenericRecord> write
+              = BigQueryIO.<GenericRecord>write()
+                      .skipInvalidRows()
+                      .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+                      .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
+                      .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+                      .to(options.getOutputTableSpec())
+                      .withSchema(bqSchema)
+                      .withFormatFunction(bqFormatFunction)
+                      .withExtendedErrorInfo()
+                      .withAutoSharding()
+                      .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors());
+
+      if (options.isIncludeInsertTimestamp()) {
+        write = write.withTimePartitioning(
+                new TimePartitioning()
+                        .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
+                        .setType("HOUR")
+                        .setRequirePartitionFilter(true));
+      }
+
       WriteResult bqWriteResults
               = records
-                      .apply("WriteToBQ",
-                              BigQueryIO.<GenericRecord>write()
-                                      .skipInvalidRows()
-                                      .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                                      .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                                      .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                                      .to(options.getOutputTableSpec())
-                                      .withSchema(bqSchema)
-                                      .withFormatFunction(bqFormatFunction)
-                                      .withExtendedErrorInfo()
-                                      .withAutoSharding()
-                                      .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
+                      .apply("WriteToBQ", write);
 
       bqWriteResults
               .getFailedInsertsWithErr()
@@ -349,7 +361,7 @@ public class PubsubToBigQuery {
 
     @ProcessElement
     public void processElement(ProcessContext context) throws IOException {
-      // capture the element, decode it from JSON into a GenericRecord and send it downstream
+      // capture the element, decode it from JSON into a GenericRecord and send it downstream      
       PubsubMessage message = context.element();
       String msgPayload = new String(message.getPayload());
       try {
