@@ -25,6 +25,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.JsonProperties;
@@ -169,12 +170,12 @@ public class PubsubToBigQuery {
             = record -> BigQueryUtils.toTableRow(AvroUtils.toBeamRowStrict(record, null));
 
     if (options.isIncludeInsertTimestamp()) {
-      bqSchema
-              = bqSchema.set(BQ_INSERT_TIMESTAMP_FIELDNAME,
-                      new TableFieldSchema()
-                              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                              .setType("TIMESTAMP")
-                              .setMode("NULLABLE"));
+      List<TableFieldSchema> fields = new ArrayList<>(bqSchema.getFields());
+      fields.add(new TableFieldSchema()
+              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
+              .setType("TIMESTAMP")
+              .setMode("NULLABLE"));
+      bqSchema = bqSchema.setFields(fields);
 
       bqFormatFunction = record -> {
         Row beamRow = AvroUtils.toBeamRowStrict(record, null);

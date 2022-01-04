@@ -50,7 +50,12 @@
       <artifactId>beam-sdks-java-io-parquet</artifactId>
     </dependency>
     
-      <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-core -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-bigquery</artifactId>
+    </dependency>
+    
+    <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-core -->
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-core</artifactId>

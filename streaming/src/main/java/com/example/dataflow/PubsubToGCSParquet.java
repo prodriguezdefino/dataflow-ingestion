@@ -144,10 +144,10 @@ public class PubsubToGCSParquet {
    * @param options The execution parameters to the pipeline.
    * @return The result of the pipeline execution.
    */
-  static PipelineResult run(PStoGCSParquetOptions options) throws IOException {
+  static PipelineResult run(PStoGCSParquetOptions options) throws IOException {    
     // Create the pipeline
     Pipeline pipeline = Pipeline.create(options);
-
+    
     Preconditions.checkArgument(!(options.isFlatNamingStructure() && options.isHourlySuccessFiles()),
             "Flat filename and hourly filepath structure are mutually exclusive.");
 
