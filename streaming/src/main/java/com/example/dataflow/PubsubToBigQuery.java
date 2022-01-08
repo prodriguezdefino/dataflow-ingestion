@@ -234,7 +234,6 @@ public class PubsubToBigQuery {
     } else {
       BigQueryIO.Write<GenericRecord> write
               = BigQueryIO.<GenericRecord>write()
-                      .skipInvalidRows()
                       .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
                       .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
                       .to(options.getOutputTableSpec())
