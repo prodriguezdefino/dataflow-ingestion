@@ -236,7 +236,6 @@ public class GCSParquetToBigQuery {
                                               .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
                                               .setType("DAY"))
                               .to(options.getOutputTableSpec())
-                              .withNumStorageWriteApiStreams(200)
                               .withSchema(
                                       BigQueryUtils.toTableSchema(rowSchemaWithJsonEvent))
                               .useBeamSchema());
