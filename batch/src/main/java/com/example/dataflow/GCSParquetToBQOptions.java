@@ -58,4 +58,10 @@ public interface GCSParquetToBQOptions extends DataflowPipelineOptions {
   Boolean isBatchUpload();
 
   void setBatchUpload(Boolean value);
+  
+  @Description("Inserts event data as a JSON datatype using BQ StorageWriteAPI.")
+  @Default.Boolean(false)
+  Boolean isStoreEventAsJson();
+
+  void setStoreEventAsJson(Boolean value);
 }
