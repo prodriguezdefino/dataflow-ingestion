@@ -15,40 +15,53 @@
  */
 package com.example.dataflow;
 
+import com.example.dataflow.utils.AvroJsonLogicalType;
+import com.example.dataflow.utils.Functions;
 import com.google.api.services.bigquery.model.TableFieldSchema;
-import com.google.api.services.bigquery.model.TableRow;
+import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.bigquery.model.TimePartitioning;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.avro.JsonProperties;
+import org.apache.avro.LogicalType;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.io.EncoderFactory;
+import org.apache.avro.specific.SpecificData;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroGenericCoder;
 import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.io.FileIO;
+import org.apache.beam.sdk.io.gcp.bigquery.AvroWriteRequest;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils;
-import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.schemas.utils.AvroUtils;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.SerializableBiFunction;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.SerializableFunctions;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.joda.time.Instant;
@@ -154,28 +167,15 @@ public class GCSParquetToBigQuery {
     LOG.info("Pipeline will be using AVRO schema:\n{}", avroSchemaStr);
 
     var avroSchema = new Schema.Parser().parse(avroSchemaStr);
-    var beamSchema = AvroUtils.toBeamSchema(avroSchema);
-
-    var bqSchema = BigQueryUtils.toTableSchema(beamSchema);
-    SerializableFunction<GenericRecord, TableRow> bqFormatFunction
-            = record -> BigQueryUtils.toTableRow(AvroUtils.toBeamRowStrict(record, null));
-
-    if (options.isIncludeInsertTimestamp()) {
-      bqSchema
-              = bqSchema.set(BQ_INSERT_TIMESTAMP_FIELDNAME,
-                      new TableFieldSchema()
-                              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                              .setType("TIMESTAMP")
-                              .setMode("NULLABLE"));
-
-      bqFormatFunction = record -> {
-        Row beamRow = AvroUtils.toBeamRowStrict(record, null);
-        TableRow tableRow = BigQueryUtils
-                .toTableRow(beamRow)
-                .set(BQ_INSERT_TIMESTAMP_FIELDNAME, "AUTO");
-        return tableRow;
-      };
-    }
+    var bqSchema
+            = BigQueryUtils
+                    .toTableSchema(AvroUtils.toBeamSchema(avroSchema))
+                    .set(
+                            BQ_INSERT_TIMESTAMP_FIELDNAME,
+                            new TableFieldSchema()
+                                    .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
+                                    .setType("TIMESTAMP")
+                                    .setMode("NULLABLE"));
 
     /*
      * Steps:
@@ -191,104 +191,302 @@ public class GCSParquetToBigQuery {
             .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema));
 
     if (options.isStoreEventAsJson()) {
-      var rowSchemaWithJsonEvent = org.apache.beam.sdk.schemas.Schema
-              .builder()
-              .addStringField("id")
-              .addDateTimeField(BQ_INSERT_TIMESTAMP_FIELDNAME)
-              // will host the event as a json string
-              .addStringField("event")
-              .build();
+      var bqTableSchema
+              = new TableSchema()
+                      .setFields(
+                              List.of(
+                                      new TableFieldSchema()
+                                              .setName("id")
+                                              .setType("STRING")
+                                              .setMode("NULLABLE"),
+                                      new TableFieldSchema()
+                                              .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
+                                              .setType("TIMESTAMP")
+                                              .setMode("NULLABLE"),
+                                      new TableFieldSchema()
+                                              .setName("event")
+                                              .setType("JSON")
+                                              .setMode("NULLABLE")));
 
-      SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper = (GenericRecord record) -> {
+      SerializableFunction<GenericRecord, String> genericRecordToJsonString = record -> {
         var jsonWriter = new GenericDatumWriter<>(record.getSchema());
         try ( var baos = new ByteArrayOutputStream()) {
           var encoder = EncoderFactory.get().jsonEncoder(record.getSchema(), baos);
           jsonWriter.write(record, encoder);
           encoder.flush();
-          return Row.withSchema(rowSchemaWithJsonEvent)
-                  .withFieldValue("id", record.get("id").toString())
-                  .withFieldValue(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now())
-                  .withFieldValue("event", baos.toString())
-                  .build();
+          return baos.toString();
         } catch (final IOException e) {
           throw new RuntimeException(e);
         }
       };
 
-      records
-              .apply("TransformToRows",
-                      MapElements
-                              .into(TypeDescriptors.rows())
-                              .via(rowWithJsonEventMapper))
-              .setCoder(RowCoder.of(rowSchemaWithJsonEvent))
-              .apply("WriteToBQ",
-                      BigQueryIO
-                              .<Row>write()
-                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_TRUNCATE)
-                              .withSchemaUpdateOptions(
-                                      Sets.newHashSet(
-                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
-                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_RELAXATION))
-                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                              .withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API)
-                              .withTimePartitioning(
-                                      new TimePartitioning()
-                                              .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                                              .setType("DAY"))
-                              .to(options.getOutputTableSpec())
-                              .withSchema(
-                                      BigQueryUtils.toTableSchema(rowSchemaWithJsonEvent))
-                              .useBeamSchema());
+      if (options.isBatchUpload()) {
+        Functions.SerializableProvider<Void> avroJsonLogicalTypeRegister = () -> {
 
-    } else if (options.isBatchUpload()) {
+          SpecificData.get().addLogicalTypeConversion(AvroJsonLogicalType.JsonAvroConversion.get());
+
+          LogicalTypes.register(AvroJsonLogicalType.JSON_LOGICAL_TYPE_NAME, new LogicalTypes.LogicalTypeFactory() {
+            private final LogicalType jsonLogicalType = AvroJsonLogicalType.get();
+
+            @Override
+            public LogicalType fromSchema(Schema schema) {
+              return jsonLogicalType;
+            }
+          });
+          return (Void) null;
+        };
+
+        avroJsonLogicalTypeRegister.apply();
+
+        var avroJsonEventSchema = Schema.createRecord(
+                "Event",
+                "Event avro schema",
+                "com.example.dataflow",
+                false,
+                List.of(
+                        new Schema.Field(
+                                "id",
+                                Schema.createUnion(
+                                        Lists.newArrayList(
+                                                Schema.create(Schema.Type.NULL),
+                                                Schema.create(Schema.Type.STRING))),
+                                "identifier of the record",
+                                JsonProperties.NULL_VALUE),
+                        new Schema.Field(
+                                BQ_INSERT_TIMESTAMP_FIELDNAME,
+                                Schema.createUnion(
+                                        Lists.newArrayList(
+                                                Schema.create(Schema.Type.NULL),
+                                                LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG)))),
+                                null,
+                                JsonProperties.NULL_VALUE),
+                        new Schema.Field(
+                                "event",
+                                Schema.createUnion(
+                                        Lists.newArrayList(
+                                                Schema.create(Schema.Type.NULL),
+                                                AvroJsonLogicalType.get().addToSchema(Schema.create(Schema.Type.STRING)))),
+                                "record as a json string",
+                                JsonProperties.NULL_VALUE)));
+
+        var avroJsonEventSchemaStr = avroJsonEventSchema.toString();
+
+        LOG.info("AVRO schema for JSON events:\n{}", avroJsonEventSchemaStr);
+
+        SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc
+                = avroWriteRequest -> {
+                  var record = avroWriteRequest.getElement();
+                  return new GenericRecordBuilder(new Schema.Parser().parse(avroJsonEventSchemaStr))
+                          .set("id", record.get("id").toString())
+                          .set(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now().getMillis() * 1000)
+                          .set("event", genericRecordToJsonString.apply(record))
+                          .build();
+                };
+
+        records.apply("WriteRecords",
+                WriteToBigQuery
+                        .useFileLoads(
+                                options.getOutputTableSpec(),
+                                bqTableSchema,
+                                avroJsonEventSchemaStr)
+                        .withAvroMappingFunction(avroMappingFunc));
+
+      } else {
+        var rowSchemaWithJsonEvent = org.apache.beam.sdk.schemas.Schema
+                .builder()
+                .addStringField("id")
+                .addDateTimeField(BQ_INSERT_TIMESTAMP_FIELDNAME)
+                // will host the event as a json string
+                .addStringField("event")
+                .build();
+
+        SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper = record -> {
+          return Row.withSchema(rowSchemaWithJsonEvent)
+                  .withFieldValue("id", record.get("id").toString())
+                  .withFieldValue(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now())
+                  .withFieldValue("event", genericRecordToJsonString.apply(record))
+                  .build();
+        };
+
+        records.apply("WriteRecords",
+                WriteToBigQuery
+                        .useStorageWrites(
+                                options.getOutputTableSpec(),
+                                bqTableSchema,
+                                rowWithJsonEventMapper,
+                                rowSchemaWithJsonEvent));
+      }
+    } else {
       var timestampedSchema = addNullableTimestampFieldToAvroSchema(avroSchema, BQ_INSERT_TIMESTAMP_FIELDNAME);
       var timestampedSchemaStr = timestampedSchema.toString();
-      records
-              .apply("AddTSToRecord", ParDo.of(new AddInsertTimestampToGenericRecord(timestampedSchemaStr)))
+
+      SerializableBiFunction<Functions.SerializableProvider<Schema>, GenericRecord, GenericRecord> recordBiMap
+              = (readerSchema, record) -> {
+                var writerSchema = record.getSchema();
+                //var readerSchemaSupplier = Suppliers.memoize(() -> new Schema.Parser().parse(timestampedSchemaStr));
+                try {
+                  var w = new GenericDatumWriter<>(writerSchema);
+                  var outputStream = new ByteArrayOutputStream();
+                  var encoder = EncoderFactory.get().binaryEncoder(outputStream, null);
+
+                  w.write(record, encoder);
+                  encoder.flush();
+
+                  var reader = new GenericDatumReader<GenericRecord>(
+                          writerSchema,
+                          //readerSchemaSupplier.get());
+                          readerSchema.apply());
+                  var decoder = DecoderFactory.get().binaryDecoder(outputStream.toByteArray(), null);
+                  var result = reader.read(null, decoder);
+
+                  // adding current local timestamp as microseconds, supported on BQ for avro batch loads
+                  result.put(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now().getMillis() * 1000);
+
+                  return result;
+
+                } catch (IOException e) {
+                  throw new RuntimeException(
+                          String.format("Error while trying to add timestamp to generic record %s with schema %s", record, writerSchema),
+                          e);
+                }
+              };
+
+      var curriedMapper = curry(recordBiMap).apply(() -> new Schema.Parser().parse(timestampedSchemaStr));
+
+      SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc
+              = avroWriteRequest -> curriedMapper.apply(avroWriteRequest.getElement());
+
+      records.apply("AddTSToRecord", ParDo.of(new AddInsertTimestampToGenericRecord(timestampedSchemaStr)))
               .setCoder(AvroGenericCoder.of(timestampedSchema))
-              .apply("WriteToBQ",
-                      BigQueryIO.<GenericRecord>write()
-                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_TRUNCATE)
-                              .withSchemaUpdateOptions(
-                                      Sets.newHashSet(
-                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
-                                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_RELAXATION))
-                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                              .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
-                              .withTimePartitioning(
-                                      new TimePartitioning()
-                                              .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                                              .setType("DAY"))
-                              .to(options.getOutputTableSpec() + "$20211007")
-                              // bq schema based on the new avro schema
-                              .withSchema(
-                                      BigQueryUtils.toTableSchema(
-                                              AvroUtils.toBeamSchema(new Schema.Parser().parse(timestampedSchemaStr))))
-                              // new avro schema, string format because is not serializable
-                              .withAvroSchemaFactory(bqschema -> new Schema.Parser().parse(timestampedSchemaStr))
-                              // simple writer configuration, not much to do
-                              .withAvroWriter(
-                                      avroWriteRequest -> avroWriteRequest.getElement(),
-                                      schema -> new GenericDatumWriter<>(schema)));
-
-    } else {
-      records
-              .apply("WriteToBQ",
-                      BigQueryIO.<GenericRecord>write()
-                              .skipInvalidRows()
-                              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                              .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-                              .to(options.getOutputTableSpec())
-                              .withSchema(bqSchema)
-                              .withFormatFunction(bqFormatFunction)
-                              .withExtendedErrorInfo()
-                              .withAutoSharding()
-                              .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors()));
-
+              .apply("WriteRecords",
+                      WriteToBigQuery
+                              .useFileLoads(
+                                      options.getOutputTableSpec(),
+                                      bqSchema,
+                                      timestampedSchemaStr)
+              //                      .withAvroMappingFunction(avroMappingFunc));
+              );
     }
     // Execute the pipeline and return the result.
     return pipeline.run();
+  }
+
+  static <A, B, R> SerializableFunction<A, SerializableFunction<B, R>> curry(
+          SerializableBiFunction<A, B, R> func) {
+    return (a) -> (b) -> func.apply(a, b);
+  }
+
+  static abstract class WriteToBigQuery<T, K> extends PTransform<PCollection<T>, PDone> {
+
+    protected final ValueProvider<String> destinationTableSpec;
+    protected final String tableJsonSchema;
+
+    WriteToBigQuery(ValueProvider<String> tableSpec, TableSchema tableSchema) {
+      this.destinationTableSpec = tableSpec;
+      this.tableJsonSchema = BigQueryHelpers.toJsonString(tableSchema);
+    }
+
+    public static FileLoadWrite useFileLoads(
+            ValueProvider<String> destinationTableSpec,
+            TableSchema tableSchema,
+            String avroJsonSchemaAsString) {
+      return new FileLoadWrite(destinationTableSpec, tableSchema, avroJsonSchemaAsString);
+    }
+
+    public static StorageWriteAPIWrite useStorageWrites(
+            ValueProvider<String> destinationTableSpec,
+            TableSchema tableSchema,
+            SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper,
+            org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent) {
+      return new StorageWriteAPIWrite(destinationTableSpec, tableSchema, rowWithJsonEventMapper, rowSchemaWithJsonEvent);
+    }
+
+    protected BigQueryIO.Write<K> baseWritePTransform(BigQueryIO.Write<K> write) {
+      return write
+              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
+              .withSchemaUpdateOptions(
+                      Sets.newHashSet(
+                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
+                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_RELAXATION))
+              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+//              .withTimePartitioning(
+//                      new TimePartitioning()
+//                              .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
+//                              .setType("DAY"))
+              .to(this.destinationTableSpec)
+              .withJsonSchema(tableJsonSchema);
+    }
+
+    protected abstract void processWrite(PCollection<T> input);
+
+    @Override
+    public PDone expand(PCollection<T> input) {
+      processWrite(input);
+      return PDone.in(input.getPipeline());
+    }
+
+    static class FileLoadWrite extends WriteToBigQuery<GenericRecord, GenericRecord> {
+
+      private final String avroSchemaAsJsonStr;
+      private SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc = null;
+
+      FileLoadWrite(ValueProvider<String> tableSpec, TableSchema tableSchema, String avroSchemaAsJsonStr) {
+        super(tableSpec, tableSchema);
+        this.avroSchemaAsJsonStr = avroSchemaAsJsonStr;
+      }
+
+      public FileLoadWrite withAvroMappingFunction(
+              SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc) {
+        this.avroMappingFunc = avroMappingFunc;
+        return this;
+      }
+
+      @Override
+      public void processWrite(PCollection<GenericRecord> input) {
+        if (avroMappingFunc == null) {
+          avroMappingFunc = avroWriteRequest -> avroWriteRequest.getElement();
+        }
+        input.apply("WriteToBQWithFileLoads",
+                baseWritePTransform(BigQueryIO.<GenericRecord>write())
+                        .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+                        // simple writer configuration, not much to do
+                        .withAvroWriter(
+                                avroMappingFunc,
+                                schema -> new GenericDatumWriter<>(new Schema.Parser().parse(avroSchemaAsJsonStr)))
+                        .to(this.destinationTableSpec));
+      }
+
+    }
+
+    static class StorageWriteAPIWrite extends WriteToBigQuery<GenericRecord, Row> {
+
+      private final SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper;
+      private final org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent;
+
+      StorageWriteAPIWrite(
+              ValueProvider<String> tableSpec,
+              TableSchema tableSchema,
+              SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper,
+              org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent) {
+        super(tableSpec, tableSchema);
+        this.rowWithJsonEventMapper = rowWithJsonEventMapper;
+        this.rowSchemaWithJsonEvent = rowSchemaWithJsonEvent;
+      }
+
+      @Override
+      public void processWrite(PCollection<GenericRecord> input) {
+        input
+                .apply("TransformToRows",
+                        MapElements
+                                .into(TypeDescriptors.rows())
+                                .via(rowWithJsonEventMapper))
+                .setCoder(RowCoder.of(rowSchemaWithJsonEvent))
+                .apply("WriteToBQWithStorageWriteAPI",
+                        baseWritePTransform(BigQueryIO.<Row>write())
+                                .withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API)
+                                .useBeamSchema());
+      }
+    }
   }
 
   static class AddInsertTimestampToGenericRecord extends DoFn<GenericRecord, GenericRecord> {

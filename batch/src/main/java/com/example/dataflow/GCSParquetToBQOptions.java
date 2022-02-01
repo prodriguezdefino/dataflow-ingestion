@@ -46,20 +46,14 @@ public interface GCSParquetToBQOptions extends DataflowPipelineOptions {
   ValueProvider<String> getOutputTableSpec();
 
   void setOutputTableSpec(ValueProvider<String> value);
-
-  @Description("Includes an insert timestamp column in the table and populates with the insertion time.")
-  @Default.Boolean(true)
-  Boolean isIncludeInsertTimestamp();
-
-  void setIncludeInsertTimestamp(Boolean value);
   
   @Description("Inserts data using BQ batch loads.")
-  @Default.Boolean(true)
+  @Default.Boolean(false)
   Boolean isBatchUpload();
 
   void setBatchUpload(Boolean value);
   
-  @Description("Inserts event data as a JSON datatype using BQ StorageWriteAPI.")
+  @Description("Inserts event data as a JSON datatype.")
   @Default.Boolean(false)
   Boolean isStoreEventAsJson();
 
