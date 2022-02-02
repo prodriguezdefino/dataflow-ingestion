@@ -15,9 +15,18 @@
  */
 package com.example.dataflow.utils;
 
+import com.google.api.services.bigquery.model.TableFieldSchema;
+import com.google.api.services.bigquery.model.TableSchema;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import com.google.common.collect.Lists;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.stream.Collectors;
+import org.apache.avro.JsonProperties;
+import org.apache.avro.LogicalTypes;
+import org.apache.avro.Schema;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.MutablePeriod;
@@ -31,7 +40,7 @@ import org.joda.time.format.PeriodParser;
  * A collection of static methods for Date manipulation.
  */
 public class Utilities {
-  
+
   private static final String OUTPUT_PATH_MINUTE_WINDOW = "YYYY/MM/DD/HH/mm/";
   private static final String OUTPUT_PATH_HOURLY_WINDOW = "YYYY/MM/DD/HH/";
   private static final String OUTPUT_PATH_FLAT_WINDOW = "YYYYMMDDHHmm";
@@ -126,5 +135,35 @@ public class Utilities {
             .replace("DD", DAY.print(time))
             .replace("HH", HOUR.print(time))
             .replace("mm", MINUTE.print(time));
+  }
+
+  public static TableSchema addNullableTimestampColumnToBQSchema(TableSchema bqSchema, String fieldName) {
+    List<TableFieldSchema> fields = new ArrayList<>(bqSchema.getFields());
+    fields.add(new TableFieldSchema()
+            .setName(fieldName)
+            .setType("TIMESTAMP")
+            .setMode("NULLABLE"));
+    return new TableSchema().setFields(fields);
+  }
+
+  public static Schema addNullableTimestampFieldToAvroSchema(Schema base, String fieldName) {
+    var timestampMilliType
+            = Schema.createUnion(
+                    Lists.newArrayList(
+                            Schema.create(Schema.Type.NULL),
+                            LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG))));
+
+    var baseFields = base.getFields().stream()
+            .map(field -> new Schema.Field(field.name(), field.schema(), field.doc(), field.defaultVal()))
+            .collect(Collectors.toList());
+
+    baseFields.add(new Schema.Field(fieldName, timestampMilliType, null, JsonProperties.NULL_VALUE));
+
+    return Schema.createRecord(
+            base.getName(),
+            base.getDoc(),
+            base.getNamespace(),
+            false,
+            baseFields);
   }
 }

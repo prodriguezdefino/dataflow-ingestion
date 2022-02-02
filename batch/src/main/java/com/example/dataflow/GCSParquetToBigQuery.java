@@ -15,14 +15,13 @@
  */
 package com.example.dataflow;
 
+import com.example.dataflow.transforms.WriteToBigQuery;
 import com.example.dataflow.utils.AvroJsonLogicalType;
 import com.example.dataflow.utils.Functions;
+import com.example.dataflow.utils.Utilities;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
-import com.google.api.services.bigquery.model.TimePartitioning;
-import com.google.common.base.Suppliers;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -43,27 +42,17 @@ import org.apache.avro.specific.SpecificData;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroGenericCoder;
-import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.gcp.bigquery.AvroWriteRequest;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.schemas.utils.AvroUtils;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.SerializableBiFunction;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.transforms.SerializableFunctions;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.sdk.values.TypeDescriptors;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -164,18 +153,9 @@ public class GCSParquetToBigQuery {
             .stream()
             .collect(Collectors.joining("\n"));
 
-    LOG.info("Pipeline will be using AVRO schema:\n{}", avroSchemaStr);
+    LOG.info("Pipeline will be reading files with AVRO schema:\n{}", avroSchemaStr);
 
     var avroSchema = new Schema.Parser().parse(avroSchemaStr);
-    var bqSchema
-            = BigQueryUtils
-                    .toTableSchema(AvroUtils.toBeamSchema(avroSchema))
-                    .set(
-                            BQ_INSERT_TIMESTAMP_FIELDNAME,
-                            new TableFieldSchema()
-                                    .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                                    .setType("TIMESTAMP")
-                                    .setMode("NULLABLE"));
 
     /*
      * Steps:
@@ -221,6 +201,7 @@ public class GCSParquetToBigQuery {
       };
 
       if (options.isBatchUpload()) {
+        //TODO: this approach is currently not working (Feb 2022), BQ load request can not map a String to JSON when reading from AVRO
         Functions.SerializableProvider<Void> avroJsonLogicalTypeRegister = () -> {
 
           SpecificData.get().addLogicalTypeConversion(AvroJsonLogicalType.JsonAvroConversion.get());
@@ -317,176 +298,44 @@ public class GCSParquetToBigQuery {
                                 rowSchemaWithJsonEvent));
       }
     } else {
-      var timestampedSchema = addNullableTimestampFieldToAvroSchema(avroSchema, BQ_INSERT_TIMESTAMP_FIELDNAME);
+      var timestampedSchema = Utilities.addNullableTimestampFieldToAvroSchema(avroSchema, BQ_INSERT_TIMESTAMP_FIELDNAME);
       var timestampedSchemaStr = timestampedSchema.toString();
+      var bqSchema
+              = Utilities.addNullableTimestampColumnToBQSchema(
+                      BigQueryUtils.toTableSchema(AvroUtils.toBeamSchema(avroSchema)),
+                      BQ_INSERT_TIMESTAMP_FIELDNAME);
 
-      SerializableBiFunction<Functions.SerializableProvider<Schema>, GenericRecord, GenericRecord> recordBiMap
-              = (readerSchema, record) -> {
-                var writerSchema = record.getSchema();
-                //var readerSchemaSupplier = Suppliers.memoize(() -> new Schema.Parser().parse(timestampedSchemaStr));
-                try {
-                  var w = new GenericDatumWriter<>(writerSchema);
-                  var outputStream = new ByteArrayOutputStream();
-                  var encoder = EncoderFactory.get().binaryEncoder(outputStream, null);
+      LOG.info("AVRO schema with timestamp {}", timestampedSchemaStr);
+      LOG.info("BQ schema with timestamp {}", bqSchema.toPrettyString());
 
-                  w.write(record, encoder);
-                  encoder.flush();
+      var tsRecords = records
+              .apply("AddTSToRecord",
+                      ParDo.of(new AddInsertTimestampToGenericRecord(timestampedSchemaStr, BQ_INSERT_TIMESTAMP_FIELDNAME)))
+              .setCoder(AvroGenericCoder.of(timestampedSchema));
 
-                  var reader = new GenericDatumReader<GenericRecord>(
-                          writerSchema,
-                          //readerSchemaSupplier.get());
-                          readerSchema.apply());
-                  var decoder = DecoderFactory.get().binaryDecoder(outputStream.toByteArray(), null);
-                  var result = reader.read(null, decoder);
+      if (options.isBatchUpload()) {
+        tsRecords
+                .apply("WriteRecords",
+                        WriteToBigQuery
+                                .useFileLoads(
+                                        options.getOutputTableSpec(),
+                                        bqSchema,
+                                        timestampedSchemaStr)
+                                .withDailyPartitionColumn(BQ_INSERT_TIMESTAMP_FIELDNAME));
+      } else {
+        var beamRowSchema = AvroUtils.toBeamSchema(timestampedSchema);
 
-                  // adding current local timestamp as microseconds, supported on BQ for avro batch loads
-                  result.put(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now().getMillis() * 1000);
-
-                  return result;
-
-                } catch (IOException e) {
-                  throw new RuntimeException(
-                          String.format("Error while trying to add timestamp to generic record %s with schema %s", record, writerSchema),
-                          e);
-                }
-              };
-
-      var curriedMapper = curry(recordBiMap).apply(() -> new Schema.Parser().parse(timestampedSchemaStr));
-
-      SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc
-              = avroWriteRequest -> curriedMapper.apply(avroWriteRequest.getElement());
-
-      records.apply("AddTSToRecord", ParDo.of(new AddInsertTimestampToGenericRecord(timestampedSchemaStr)))
-              .setCoder(AvroGenericCoder.of(timestampedSchema))
-              .apply("WriteRecords",
-                      WriteToBigQuery
-                              .useFileLoads(
-                                      options.getOutputTableSpec(),
-                                      bqSchema,
-                                      timestampedSchemaStr)
-              //                      .withAvroMappingFunction(avroMappingFunc));
-              );
+        tsRecords.apply("WriteRecords",
+                WriteToBigQuery
+                        .useStorageWrites(
+                                options.getOutputTableSpec(),
+                                bqSchema,
+                                AvroUtils.getGenericRecordToRowFunction(beamRowSchema),
+                                beamRowSchema));
+      }
     }
     // Execute the pipeline and return the result.
     return pipeline.run();
-  }
-
-  static <A, B, R> SerializableFunction<A, SerializableFunction<B, R>> curry(
-          SerializableBiFunction<A, B, R> func) {
-    return (a) -> (b) -> func.apply(a, b);
-  }
-
-  static abstract class WriteToBigQuery<T, K> extends PTransform<PCollection<T>, PDone> {
-
-    protected final ValueProvider<String> destinationTableSpec;
-    protected final String tableJsonSchema;
-
-    WriteToBigQuery(ValueProvider<String> tableSpec, TableSchema tableSchema) {
-      this.destinationTableSpec = tableSpec;
-      this.tableJsonSchema = BigQueryHelpers.toJsonString(tableSchema);
-    }
-
-    public static FileLoadWrite useFileLoads(
-            ValueProvider<String> destinationTableSpec,
-            TableSchema tableSchema,
-            String avroJsonSchemaAsString) {
-      return new FileLoadWrite(destinationTableSpec, tableSchema, avroJsonSchemaAsString);
-    }
-
-    public static StorageWriteAPIWrite useStorageWrites(
-            ValueProvider<String> destinationTableSpec,
-            TableSchema tableSchema,
-            SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper,
-            org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent) {
-      return new StorageWriteAPIWrite(destinationTableSpec, tableSchema, rowWithJsonEventMapper, rowSchemaWithJsonEvent);
-    }
-
-    protected BigQueryIO.Write<K> baseWritePTransform(BigQueryIO.Write<K> write) {
-      return write
-              .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-              .withSchemaUpdateOptions(
-                      Sets.newHashSet(
-                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
-                              BigQueryIO.Write.SchemaUpdateOption.ALLOW_FIELD_RELAXATION))
-              .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
-//              .withTimePartitioning(
-//                      new TimePartitioning()
-//                              .setField(BQ_INSERT_TIMESTAMP_FIELDNAME)
-//                              .setType("DAY"))
-              .to(this.destinationTableSpec)
-              .withJsonSchema(tableJsonSchema);
-    }
-
-    protected abstract void processWrite(PCollection<T> input);
-
-    @Override
-    public PDone expand(PCollection<T> input) {
-      processWrite(input);
-      return PDone.in(input.getPipeline());
-    }
-
-    static class FileLoadWrite extends WriteToBigQuery<GenericRecord, GenericRecord> {
-
-      private final String avroSchemaAsJsonStr;
-      private SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc = null;
-
-      FileLoadWrite(ValueProvider<String> tableSpec, TableSchema tableSchema, String avroSchemaAsJsonStr) {
-        super(tableSpec, tableSchema);
-        this.avroSchemaAsJsonStr = avroSchemaAsJsonStr;
-      }
-
-      public FileLoadWrite withAvroMappingFunction(
-              SerializableFunction<AvroWriteRequest<GenericRecord>, GenericRecord> avroMappingFunc) {
-        this.avroMappingFunc = avroMappingFunc;
-        return this;
-      }
-
-      @Override
-      public void processWrite(PCollection<GenericRecord> input) {
-        if (avroMappingFunc == null) {
-          avroMappingFunc = avroWriteRequest -> avroWriteRequest.getElement();
-        }
-        input.apply("WriteToBQWithFileLoads",
-                baseWritePTransform(BigQueryIO.<GenericRecord>write())
-                        .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
-                        // simple writer configuration, not much to do
-                        .withAvroWriter(
-                                avroMappingFunc,
-                                schema -> new GenericDatumWriter<>(new Schema.Parser().parse(avroSchemaAsJsonStr)))
-                        .to(this.destinationTableSpec));
-      }
-
-    }
-
-    static class StorageWriteAPIWrite extends WriteToBigQuery<GenericRecord, Row> {
-
-      private final SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper;
-      private final org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent;
-
-      StorageWriteAPIWrite(
-              ValueProvider<String> tableSpec,
-              TableSchema tableSchema,
-              SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper,
-              org.apache.beam.sdk.schemas.Schema rowSchemaWithJsonEvent) {
-        super(tableSpec, tableSchema);
-        this.rowWithJsonEventMapper = rowWithJsonEventMapper;
-        this.rowSchemaWithJsonEvent = rowSchemaWithJsonEvent;
-      }
-
-      @Override
-      public void processWrite(PCollection<GenericRecord> input) {
-        input
-                .apply("TransformToRows",
-                        MapElements
-                                .into(TypeDescriptors.rows())
-                                .via(rowWithJsonEventMapper))
-                .setCoder(RowCoder.of(rowSchemaWithJsonEvent))
-                .apply("WriteToBQWithStorageWriteAPI",
-                        baseWritePTransform(BigQueryIO.<Row>write())
-                                .withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API)
-                                .useBeamSchema());
-      }
-    }
   }
 
   static class AddInsertTimestampToGenericRecord extends DoFn<GenericRecord, GenericRecord> {
@@ -494,10 +343,12 @@ public class GCSParquetToBigQuery {
     private static final Logger LOG = LoggerFactory.getLogger(AddInsertTimestampToGenericRecord.class);
 
     private final String readerSchemaStr;
+    private final String fieldName;
     private Schema readerSchema;
 
-    public AddInsertTimestampToGenericRecord(String readerSchemaStr) {
+    public AddInsertTimestampToGenericRecord(String readerSchemaStr, String fieldName) {
       this.readerSchemaStr = readerSchemaStr;
+      this.fieldName = fieldName;
     }
 
     @Setup
@@ -521,8 +372,10 @@ public class GCSParquetToBigQuery {
         var decoder = DecoderFactory.get().binaryDecoder(outputStream.toByteArray(), null);
         var result = reader.read(null, decoder);
 
-        // adding current local timestamp as microseconds, supported on BQ for avro batch loads
-        result.put(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now().getMillis() * 1000);
+        var batchUploads = context.getPipelineOptions().as(GCSParquetToBQOptions.class).isBatchUpload();
+
+        // adding current local timestamp as microseconds when the avro data is ingested using batchloads, as is otherwise
+        result.put(fieldName, Instant.now().getMillis() * (batchUploads ? 1000 : 1));
 
         context.output(result);
       } catch (IOException e) {
@@ -532,26 +385,4 @@ public class GCSParquetToBigQuery {
     }
 
   }
-
-  static Schema addNullableTimestampFieldToAvroSchema(Schema base, String fieldName) {
-    var timestampMilliType
-            = Schema.createUnion(
-                    Lists.newArrayList(
-                            Schema.create(Schema.Type.NULL),
-                            LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG))));
-
-    var baseFields = base.getFields().stream()
-            .map(field -> new Schema.Field(field.name(), field.schema(), field.doc(), field.defaultVal()))
-            .collect(Collectors.toList());
-
-    baseFields.add(new Schema.Field(fieldName, timestampMilliType, null, JsonProperties.NULL_VALUE));
-
-    return Schema.createRecord(
-            base.getName(),
-            base.getDoc(),
-            base.getNamespace(),
-            false,
-            baseFields);
-  }
-
 }
