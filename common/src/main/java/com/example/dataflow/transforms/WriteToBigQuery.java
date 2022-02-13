@@ -2,7 +2,13 @@ package com.example.dataflow.transforms;
 
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.bigquery.model.TimePartitioning;
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.JobId;
+import com.google.cloud.bigquery.JobInfo;
+import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.common.collect.Sets;
+import java.util.UUID;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
@@ -11,18 +17,25 @@ import org.apache.beam.sdk.io.gcp.bigquery.AvroWriteRequest;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.Wait;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  *
  */
 public abstract class WriteToBigQuery<T, K> extends PTransform<PCollection<T>, PDone> {
+
+  private static final Logger LOG = LoggerFactory.getLogger(WriteToBigQuery.class);
 
   protected final ValueProvider<String> destinationTableSpec;
   protected final String tableJsonSchema;
@@ -135,7 +148,7 @@ public abstract class WriteToBigQuery<T, K> extends PTransform<PCollection<T>, P
 
     @Override
     public void processWrite(PCollection<GenericRecord> input) {
-      input
+      var failedInserts = input
               .apply("TransformToRows",
                       MapElements
                               .into(TypeDescriptors.rows())
@@ -144,7 +157,60 @@ public abstract class WriteToBigQuery<T, K> extends PTransform<PCollection<T>, P
               .apply("WriteToBQWithStorageWriteAPI",
                       baseWritePTransform(BigQueryIO.<Row>write())
                               .withMethod(BigQueryIO.Write.Method.STORAGE_WRITE_API)
-                              .useBeamSchema());
+                              .useBeamSchema())
+              .getFailedInserts();
+
+      input
+              .apply("WaitWrites", Wait.on(failedInserts))
+              .apply("TruncateOldData", ParDo.of(new RemovePreviousBQDataOnPartition(this.destinationTableSpec)));
+    }
+
+    static class RemovePreviousBQDataOnPartition extends DoFn<GenericRecord, Void> {
+
+      private static final String DELETE_OLD_DATA_QUERY = "DELETE FROM `%s.%s.%s` "
+              + "WHERE ingestion_time < (SELECT MAX(ingestion_time) FROM `%s.%s.%s`)";
+
+      private BigQuery bigQuery;
+      private ValueProvider<String> tableSpecProvider;
+      private String query;
+
+      public RemovePreviousBQDataOnPartition(ValueProvider<String> tableSpec) {
+        this.tableSpecProvider = tableSpec;
+      }
+
+      @Setup
+      public void setup() {
+        var tableSpec = BigQueryHelpers.parseTableSpec(this.tableSpecProvider.get());
+        query = String.format(
+                DELETE_OLD_DATA_QUERY,
+                tableSpec.getProjectId(),
+                tableSpec.getDatasetId(),
+                tableSpec.getTableId(),
+                tableSpec.getProjectId(),
+                tableSpec.getDatasetId(),
+                tableSpec.getTableId());
+        bigQuery = BigQueryOptions
+                .newBuilder()
+                .setProjectId(tableSpec.getProjectId())
+                .build()
+                .getService();
+      }
+
+      @ProcessElement
+      public void processElement(ProcessContext context) throws InterruptedException {
+        var queryConfig = QueryJobConfiguration
+                .newBuilder(query)
+                .setUseLegacySql(false)
+                .build();
+        var jobId = JobId.of("job_remove_old_data_from_partition_" + UUID.randomUUID().toString());
+        var deleteJob = bigQuery.create(JobInfo.newBuilder(queryConfig).setJobId(jobId).build());
+        deleteJob.getQueryResults(BigQuery.QueryResultsOption.maxWaitTime(10 * 60 * 1000));
+        deleteJob.reload();
+        if (deleteJob.isDone()) {
+          LOG.warn("delete job has not completed {}", deleteJob.getJobId().toString());
+        }
+      }
+
     }
   }
 }
