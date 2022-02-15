@@ -184,6 +184,10 @@ public class GCSParquetToBigQuery {
                                               .setType("TIMESTAMP")
                                               .setMode("NULLABLE"),
                                       new TableFieldSchema()
+                                              .setName("ingestion_time")
+                                              .setType("TIMESTAMP")
+                                              .setMode("NULLABLE"),
+                                      new TableFieldSchema()
                                               .setName("event")
                                               .setType("JSON")
                                               .setMode("NULLABLE")));
@@ -277,14 +281,18 @@ public class GCSParquetToBigQuery {
                 .builder()
                 .addStringField("id")
                 .addDateTimeField(BQ_INSERT_TIMESTAMP_FIELDNAME)
+                .addDateTimeField("ingestion_time")
                 // will host the event as a json string
                 .addStringField("event")
                 .build();
+
+        var ingestionTime = Instant.now();
 
         SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper = record -> {
           return Row.withSchema(rowSchemaWithJsonEvent)
                   .withFieldValue("id", record.get("id").toString())
                   .withFieldValue(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now())
+                  .withFieldValue("ingestion_time", ingestionTime)
                   .withFieldValue("event", genericRecordToJsonString.apply(record))
                   .build();
         };
