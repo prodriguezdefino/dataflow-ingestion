@@ -15,53 +15,33 @@
  */
 package com.example.dataflow;
 
-import com.example.dataflow.transforms.ProcessBQStreamingInsertErrors;
 import com.example.dataflow.transforms.WriteToBigQuery;
 import com.google.api.services.bigquery.model.TableFieldSchema;
-import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
-import com.google.api.services.bigquery.model.TimePartitioning;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
-import org.apache.avro.JsonProperties;
-import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.io.BinaryDecoder;
-import org.apache.avro.io.BinaryEncoder;
-import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.io.EncoderFactory;
 import org.apache.avro.io.JsonDecoder;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroCoder;
-import org.apache.beam.sdk.coders.AvroGenericCoder;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils;
-import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
-import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.schemas.utils.AvroUtils;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.joda.time.DateTime;
-import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,14 +60,16 @@ import org.slf4j.LoggerFactory;
  * --tempLocation=gs://$STAGING_BUCKET/dataflow/temp \
  * --enableStreamingEngine \
  * --numWorkers=50 \
- * --maxNumWorkers=99 \
+ * --maxNumWorkers=200 \
  * --runner=DataflowRunner \
- * --workerMachineType=n1-default-2 \
+ * --workerMachineType=n1-standard-2 \
  * --usePublicIps=false \
  * --region=us-central1 \
  * --inputSubscription=$SUBSCRIPTION \
  * --outputTableSpec=$BQ_TABLE \
- * --jobName='nokill-pstobqjson'"
+ * --storageWriteApiTriggeringFrequencySec=5 \
+ * --numStorageWriteApiStreams=1024 \
+ * --jobName='pstobqjson"
  * </pre>
  */
 public class PubsubToBigQueryEventsAsJsonType {
@@ -183,9 +165,7 @@ public class PubsubToBigQueryEventsAsJsonType {
      * Steps:
      *   1) Read messages from PubSub
      *   2) Parse those JSON message into AVRO
-     *   3) Insert into BQ using Streaming API
-     *   4) If configured, add an insert timestamp into the BQ table
-     *   5) If configured, when the column does not exists, update the BQ table schema to add the column
+     *   3) Insert into BQ using StorageWriteAPI and with the event as a JSON column
      */
     pipeline
             .apply("ReadPubSubEvents",
