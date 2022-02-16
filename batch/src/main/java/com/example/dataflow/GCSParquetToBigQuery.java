@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.avro.JsonProperties;
 import org.apache.avro.LogicalType;
@@ -144,6 +145,7 @@ public class GCSParquetToBigQuery {
    * @return The result of the pipeline execution.
    */
   static PipelineResult run(GCSParquetToBQOptions options) throws IOException {
+    options.setLabels(Map.of("como", "novandar"));
 
     // Create the pipeline
     var pipeline = Pipeline.create(options);
@@ -181,10 +183,6 @@ public class GCSParquetToBigQuery {
                                               .setMode("NULLABLE"),
                                       new TableFieldSchema()
                                               .setName(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                                              .setType("TIMESTAMP")
-                                              .setMode("NULLABLE"),
-                                      new TableFieldSchema()
-                                              .setName("ingestion_time")
                                               .setType("TIMESTAMP")
                                               .setMode("NULLABLE"),
                                       new TableFieldSchema()
@@ -281,18 +279,14 @@ public class GCSParquetToBigQuery {
                 .builder()
                 .addStringField("id")
                 .addDateTimeField(BQ_INSERT_TIMESTAMP_FIELDNAME)
-                .addDateTimeField("ingestion_time")
                 // will host the event as a json string
                 .addStringField("event")
                 .build();
-
-        var ingestionTime = Instant.now();
 
         SerializableFunction<GenericRecord, Row> rowWithJsonEventMapper = record -> {
           return Row.withSchema(rowSchemaWithJsonEvent)
                   .withFieldValue("id", record.get("id").toString())
                   .withFieldValue(BQ_INSERT_TIMESTAMP_FIELDNAME, Instant.now())
-                  .withFieldValue("ingestion_time", ingestionTime)
                   .withFieldValue("event", genericRecordToJsonString.apply(record))
                   .build();
         };
