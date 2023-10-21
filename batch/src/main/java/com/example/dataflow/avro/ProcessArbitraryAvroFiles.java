@@ -105,6 +105,8 @@ public class ProcessArbitraryAvroFiles {
                     filenameAndSchema ->
                         FileIO.Write.defaultNaming(filenameAndSchema.fileName(), ".avsc"))
                 .withNumShards(options.getNumShards()));
+    
+    pipeline.run();
   }
 
   static FileIO.Sink<GenericRecord> createSink(FilenameAndSchema fileNameAndSchema) {
