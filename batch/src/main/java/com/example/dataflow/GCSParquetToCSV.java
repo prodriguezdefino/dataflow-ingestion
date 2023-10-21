@@ -69,11 +69,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * This pipeline ingests incoming data from a Cloud Pub/Sub topic and outputs the raw data into windowed Avro files at the specified output
- * directory.
+ * This pipeline ingests incoming data from a Cloud Pub/Sub topic and outputs the raw data into
+ * windowed Avro files at the specified output directory.
  *
- * <p>
- * Output files will have the following schema:
+ * <p>Output files will have the following schema:
  *
  * <pre>
  *   {
@@ -107,8 +106,7 @@ import org.slf4j.LoggerFactory;
  *   }
  * </pre>
  *
- * <p>
- * Example Usage:
+ * <p>Example Usage:
  *
  * <pre>
  * mvn compile exec:java -Dexec.mainClass=com.example.dataflow.PubsubToBigQuery -Dexec.cleanupDaemonThreads=false -Dexec.args=" \
@@ -140,7 +138,8 @@ public class GCSParquetToCSV {
    */
   public static void main(String[] args) throws Exception {
 
-    GCSParquetToCSVOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(GCSParquetToCSVOptions.class);
+    GCSParquetToCSVOptions options =
+        PipelineOptionsFactory.fromArgs(args).withValidation().as(GCSParquetToCSVOptions.class);
 
     run(options);
   }
@@ -157,59 +156,62 @@ public class GCSParquetToCSV {
     Pipeline pipeline = Pipeline.create(options);
 
     // read AVRO schema from local filesystem
-    final String avroSchemaStr = Files.readAllLines(Paths.get(options.getAvroSchemaFileLocation()))
-            .stream()
+    final String avroSchemaStr =
+        Files.readAllLines(Paths.get(options.getAvroSchemaFileLocation())).stream()
             .collect(Collectors.joining("\n"));
 
     LOG.info("Pipeline will be using AVRO schema:\n{}", avroSchemaStr);
 
     final Schema avroSchema = new Schema.Parser().parse(avroSchemaStr);
-    final List<String> colNames = avroSchema.getFields().stream().map(f -> f.name()).collect(Collectors.toList());
+    final List<String> colNames =
+        avroSchema.getFields().stream().map(f -> f.name()).collect(Collectors.toList());
 
-    PCollection<KV<String, KV<String, String>>> categorized
-            = pipeline.apply("MatchParquetFiles", FileIO.match().filepattern(options.getInputLocation()))
-                    .apply("ReadMatches", FileIO.readMatches())
-                    .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
-                    .apply("CategorizeOnEyeColor", ParDo.of(new KVsFromEvent()));
+    PCollection<KV<String, KV<String, String>>> categorized =
+        pipeline
+            .apply("MatchParquetFiles", FileIO.match().filepattern(options.getInputLocation()))
+            .apply("ReadMatches", FileIO.readMatches())
+            .apply("ReadGenericRecords", ParquetIO.readFiles(avroSchema))
+            .apply("CategorizeOnEyeColor", ParDo.of(new KVsFromEvent()));
 
     if (options.isUseFileIO()) {
-      categorized
-              .apply("WriteToCSV(FileIO.writeDynamic)",
-                      FileIO.<String, KV<String, KV<String, String>>>writeDynamic()
-                              // write to this output prefix
-                              .to(options.getOutputLocation())
-                              // using the key as the destination
-                              .by(kv -> kv.getKey())
-                              // with our custom sink 
-                              .via(new CSVSink(colNames))
-                              // with out custom filename pattern, per destination
-                              .withNaming(destinationKey -> new DestinationFileNaming(destinationKey))
-                              // needed since we are using a custom destination
-                              .withDestinationCoder(StringUtf8Coder.of())
-                              // force configured number of files per eye color (default 1)
-                              .withNumShards(options.getNumShards()));
+      categorized.apply(
+          "WriteToCSV(FileIO.writeDynamic)",
+          FileIO.<String, KV<String, KV<String, String>>>writeDynamic()
+              // write to this output prefix
+              .to(options.getOutputLocation())
+              // using the key as the destination
+              .by(kv -> kv.getKey())
+              // with our custom sink
+              .via(new CSVSink(colNames))
+              // with out custom filename pattern, per destination
+              .withNaming(destinationKey -> new DestinationFileNaming(destinationKey))
+              // needed since we are using a custom destination
+              .withDestinationCoder(StringUtf8Coder.of())
+              // force configured number of files per eye color (default 1)
+              .withNumShards(options.getNumShards()));
     } else {
-      categorized.apply("WriteToCSV(WriteFiles+FileBasedSink)",
-              WriteFiles
-                      .to(new CSVPlusFileBasedSink(
-                              options.getTempLocation(),
-                              new CSVPlusDynamicDestinations(options.getOutputLocation()),
-                              colNames))
-                      .withNumShards(options.getNumShards())
-                      .withWindowedWrites()
-      );
+      categorized.apply(
+          "WriteToCSV(WriteFiles+FileBasedSink)",
+          WriteFiles.to(
+                  new CSVPlusFileBasedSink(
+                      options.getTempLocation(),
+                      new CSVPlusDynamicDestinations(options.getOutputLocation()),
+                      colNames))
+              .withNumShards(options.getNumShards())
+              .withWindowedWrites());
     }
 
     // Execute the pipeline and return the result.
     PipelineResult result = pipeline.run();
 
     // launch the async metrics reporter
-    try ( MetricsReporter asyncReporter
-            = MetricsReporter.create(
-                    result,
-                    Arrays.asList(
-                            MetricNameFilter.named(KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)),
-                    "CategorizeOnEyeColor.out0");) {
+    try (MetricsReporter asyncReporter =
+        MetricsReporter.create(
+            result,
+            Arrays.asList(
+                MetricNameFilter.named(
+                    KVsFromEvent.class, KVsFromEvent.RECORDS_PROCESSED_COUNTER_NAME)),
+            "CategorizeOnEyeColor.out0"); ) {
       // wait for the pipeline to finish
       result.waitUntilFinish();
 
@@ -217,12 +219,7 @@ public class GCSParquetToCSV {
       asyncReporter.stopReporter();
 
       // Request all the metrics available for the pipeline
-      MetricQueryResults metrics
-              = result
-                      .metrics()
-                      .queryMetrics(
-                              MetricsFilter.builder()
-                                      .build());
+      MetricQueryResults metrics = result.metrics().queryMetrics(MetricsFilter.builder().build());
 
       // Lets print all the available metrics
       LOG.info("***** Printing Final Values for Custom Metrics (All of them) *****");
@@ -235,7 +232,8 @@ public class GCSParquetToCSV {
 
   static class CSVSink implements FileIO.Sink<KV<String, KV<String, String>>> {
 
-    private static final Distribution WRITE_DISTRO = Metrics.distribution(CSVSink.class, "write_ms");
+    private static final Distribution WRITE_DISTRO =
+        Metrics.distribution(CSVSink.class, "write_ms");
 
     private final String header;
     private PrintWriter writer;
@@ -265,7 +263,8 @@ public class GCSParquetToCSV {
   }
 
   static class CSVPlusDynamicDestinations
-          extends FileBasedSink.DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> {
+      extends FileBasedSink.DynamicDestinations<
+          KV<String, KV<String, String>>, String, KV<String, String>> {
 
     private final ValueProvider<String> baseFilename;
     private Boolean windowedWrites = false;
@@ -297,30 +296,34 @@ public class GCSParquetToCSV {
     @Override
     public FileBasedSink.FilenamePolicy getFilenamePolicy(String destination) {
       return DefaultFilenamePolicy.fromStandardParameters(
-              ValueProvider.StaticValueProvider.of(
-                      FileBasedSink.convertToFileResourceIfPossible(baseFilename.get() + destination)),
-              null,
-              ".csv",
-              windowedWrites);
+          ValueProvider.StaticValueProvider.of(
+              FileBasedSink.convertToFileResourceIfPossible(baseFilename.get() + destination)),
+          null,
+          ".csv",
+          windowedWrites);
     }
   }
 
   /**
-   * Implements the Sink for an enhanced CSV files which contains a header section (indicating where the other sections start), an index
-   * section (containing the element keys and their location inside the file for quick retrieval), and the data section (containing the
-   * normal CSV content).
+   * Implements the Sink for an enhanced CSV files which contains a header section (indicating where
+   * the other sections start), an index section (containing the element keys and their location
+   * inside the file for quick retrieval), and the data section (containing the normal CSV content).
    */
-  public static class CSVPlusFileBasedSink extends FileBasedSink<KV<String, KV<String, String>>, String, KV<String, String>> {
+  public static class CSVPlusFileBasedSink
+      extends FileBasedSink<KV<String, KV<String, String>>, String, KV<String, String>> {
 
     private static final Logger logger = LoggerFactory.getLogger(CSVPlusFileBasedSink.class);
 
     private final List<String> colNames;
 
     public CSVPlusFileBasedSink(
-            String tempDirectory,
-            DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
-            List<String> colNames) {
-      super(ValueProvider.StaticValueProvider.of(convertToFileResourceIfPossible(tempDirectory)), dynamicDestinations);
+        String tempDirectory,
+        DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>>
+            dynamicDestinations,
+        List<String> colNames) {
+      super(
+          ValueProvider.StaticValueProvider.of(convertToFileResourceIfPossible(tempDirectory)),
+          dynamicDestinations);
       this.colNames = colNames;
       logger.info("tmp directory is {}", this.getTempDirectoryProvider());
     }
@@ -331,22 +334,25 @@ public class GCSParquetToCSV {
 
     @Override
     public WriteOperation<String, KV<String, String>> createWriteOperation() {
-      return new CSVPlusFileWriteOperation(this, this.getTempDirectoryProvider().get(), getDynamicDestinations(), colNames);
+      return new CSVPlusFileWriteOperation(
+          this, this.getTempDirectoryProvider().get(), getDynamicDestinations(), colNames);
     }
     // WriteOperation is used to managed the output file and finalized version of the files
 
     private static class CSVPlusFileWriteOperation
-            extends WriteOperation<String, KV<String, String>> {
+        extends WriteOperation<String, KV<String, String>> {
 
       private final List<String> colNames;
 
-      private final DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations;
+      private final DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>>
+          dynamicDestinations;
 
       public CSVPlusFileWriteOperation(
-              CSVPlusFileBasedSink sink,
-              ResourceId tempDirectory,
-              DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
-              List<String> colNames) {
+          CSVPlusFileBasedSink sink,
+          ResourceId tempDirectory,
+          DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>>
+              dynamicDestinations,
+          List<String> colNames) {
         super(sink, tempDirectory);
         this.dynamicDestinations = dynamicDestinations;
         this.colNames = colNames;
@@ -360,9 +366,12 @@ public class GCSParquetToCSV {
 
     private static class CSVPlusFileWriter extends Writer<String, KV<String, String>> {
 
-      private static final Distribution COMPOSE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "compose_ms");
-      private static final Distribution WRITE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "write_ms");
-      private static final Distribution DELETE_DISTRO = Metrics.distribution(CSVPlusFileWriter.class, "delete_ms");
+      private static final Distribution COMPOSE_DISTRO =
+          Metrics.distribution(CSVPlusFileWriter.class, "compose_ms");
+      private static final Distribution WRITE_DISTRO =
+          Metrics.distribution(CSVPlusFileWriter.class, "write_ms");
+      private static final Distribution DELETE_DISTRO =
+          Metrics.distribution(CSVPlusFileWriter.class, "delete_ms");
 
       private WritableByteChannel originalChannel;
       private WritableByteChannel dataChannel;
@@ -381,9 +390,10 @@ public class GCSParquetToCSV {
       private Long writeStartTS;
 
       public CSVPlusFileWriter(
-              WriteOperation<String, KV<String, String>> writeOperation,
-              DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>> dynamicDestinations,
-              List<String> colNames) {
+          WriteOperation<String, KV<String, String>> writeOperation,
+          DynamicDestinations<KV<String, KV<String, String>>, String, KV<String, String>>
+              dynamicDestinations,
+          List<String> colNames) {
         super(writeOperation, MimeTypes.TEXT);
         this.colNames = colNames;
       }
@@ -394,9 +404,10 @@ public class GCSParquetToCSV {
         // we will need this ref to close the channel before merging files
         this.originalChannel = channel;
 
-        // create temp files for header, data and index 
+        // create temp files for header, data and index
         // for that we need to capture the directory and filename that is being created
-        headerResource = FileSystems.matchNewResource(getOutputFile().toString() + ".header", false);
+        headerResource =
+            FileSystems.matchNewResource(getOutputFile().toString() + ".header", false);
         headerChannel = createCompanionFileChannel(headerResource);
         headerWriter = new PrintWriter(Channels.newOutputStream(headerChannel));
 
@@ -416,9 +427,11 @@ public class GCSParquetToCSV {
       private WritableByteChannel createCompanionFileChannel(ResourceId resource) throws Exception {
         WritableByteChannel channel = null;
         // small ugliness
-        final WritableByteChannelFactory factory
-                = ((CSVPlusFileBasedSink) getWriteOperation().getSink()).shareWritableByteChannelFactory();
-        // The factory may force a MIME type or it may return null, indicating to use the sink's MIME.
+        final WritableByteChannelFactory factory =
+            ((CSVPlusFileBasedSink) getWriteOperation().getSink())
+                .shareWritableByteChannelFactory();
+        // The factory may force a MIME type or it may return null, indicating to use the sink's
+        // MIME.
         String channelMimeType = MoreObjects.firstNonNull(factory.getMimeType(), MimeTypes.TEXT);
         WritableByteChannel tempChannel = FileSystems.create(resource, channelMimeType);
         try {
@@ -459,10 +472,9 @@ public class GCSParquetToCSV {
         // capture header data and write it to the file: index section start, data section start
         String headerFormat = "index section start: %15d, data section start: %15d\n";
         Integer headerContentSize = String.format(headerFormat, 0, 0).getBytes("UTF-16BE").length;
-        String headerContent
-                = String.format(
-                        headerFormat, headerContentSize + 1,
-                        indexBytesWritten + headerContentSize + 1);
+        String headerContent =
+            String.format(
+                headerFormat, headerContentSize + 1, indexBytesWritten + headerContentSize + 1);
         headerWriter.print(headerContent);
 
         // we can now close the header resources as well
@@ -473,30 +485,28 @@ public class GCSParquetToCSV {
         // compose the files header first, index and data later.
         Storage storage = StorageOptions.getDefaultInstance().getService();
 
-        Storage.ComposeRequest composeRequest
-                = Storage.ComposeRequest.newBuilder()
-                        // add the sources to compose, which are in order, header, index, data files (objects in GCS) 
-                        // hacky impl, prolly this can be done better
-                        .addSource(
-                                BlobId.fromGsUtilUri(headerResource.toString()).getName(),
-                                BlobId.fromGsUtilUri(indexResource.toString()).getName(),
-                                BlobId.fromGsUtilUri(dataResource.toString()).getName())
-                        // use the output file resource id to compose into 
-                        .setTarget(
-                                BlobInfo
-                                        .newBuilder(BlobId.fromGsUtilUri(getOutputFile().toString()))
-                                        .build())
-                        .build();
+        Storage.ComposeRequest composeRequest =
+            Storage.ComposeRequest.newBuilder()
+                // add the sources to compose, which are in order, header, index, data files
+                // (objects in GCS)
+                // hacky impl, prolly this can be done better
+                .addSource(
+                    BlobId.fromGsUtilUri(headerResource.toString()).getName(),
+                    BlobId.fromGsUtilUri(indexResource.toString()).getName(),
+                    BlobId.fromGsUtilUri(dataResource.toString()).getName())
+                // use the output file resource id to compose into
+                .setTarget(
+                    BlobInfo.newBuilder(BlobId.fromGsUtilUri(getOutputFile().toString())).build())
+                .build();
 
         storage.compose(composeRequest);
         COMPOSE_DISTRO.update(Instant.now().getMillis() - startComposeTS);
 
         long startDeleteTS = Instant.now().getMillis();
         // clean up files
-        FileSystems
-                .delete(
-                        Arrays.asList(headerResource, indexResource, dataResource),
-                        MoveOptions.StandardMoveOptions.IGNORE_MISSING_FILES);
+        FileSystems.delete(
+            Arrays.asList(headerResource, indexResource, dataResource),
+            MoveOptions.StandardMoveOptions.IGNORE_MISSING_FILES);
         DELETE_DISTRO.update(Instant.now().getMillis() - startDeleteTS);
       }
 
@@ -509,7 +519,8 @@ public class GCSParquetToCSV {
 
       @Override
       protected void writeFooter() throws IOException {
-        dataWriter.print("Row counter: " + this.rowCounter + ", bytes written: " + dataBytesWritten + "\n");
+        dataWriter.print(
+            "Row counter: " + this.rowCounter + ", bytes written: " + dataBytesWritten + "\n");
       }
 
       private void updateIndex(long initByte, String key) throws IOException {
@@ -521,7 +532,7 @@ public class GCSParquetToCSV {
       // Helper function to close a channel, on exception cases.
       // Always throws prior exception, with any new closing exception suppressed.
       private static void closeChannelAndThrow(
-              WritableByteChannel channel, ResourceId filename, Exception prior) throws Exception {
+          WritableByteChannel channel, ResourceId filename, Exception prior) throws Exception {
         try {
           channel.close();
         } catch (Exception e) {
@@ -537,16 +548,16 @@ public class GCSParquetToCSV {
   static class KVsFromEvent extends DoFn<GenericRecord, KV<String, KV<String, String>>> {
 
     static final String RECORDS_PROCESSED_COUNTER_NAME = "records_processed";
-    private static final Counter COUNTER = Metrics.counter(KVsFromEvent.class, RECORDS_PROCESSED_COUNTER_NAME);
+    private static final Counter COUNTER =
+        Metrics.counter(KVsFromEvent.class, RECORDS_PROCESSED_COUNTER_NAME);
 
     @ProcessElement
     public void processElement(ProcessContext context) {
       COUNTER.inc();
       GenericRecord gr = context.element();
-      // this will only consider first level fields as columns on our CSV 
-      String row = gr.getSchema()
-              .getFields()
-              .stream()
+      // this will only consider first level fields as columns on our CSV
+      String row =
+          gr.getSchema().getFields().stream()
               .map(field -> gr.get(field.name()).toString())
               .map(r -> "\"" + r + "\"")
               .collect(Collectors.joining(","));
@@ -567,22 +578,35 @@ public class GCSParquetToCSV {
     }
 
     @Override
-    public String getFilename(BoundedWindow window, PaneInfo pane, int numShards, int shardIndex, Compression compression) {
+    public String getFilename(
+        BoundedWindow window,
+        PaneInfo pane,
+        int numShards,
+        int shardIndex,
+        Compression compression) {
       StringBuilder fileNameSB = new StringBuilder(prefix);
 
       if (window != null) {
         if (window instanceof GlobalWindow) {
-          fileNameSB.append("-window-").append(
-                  DateTime.now().toString(ISODateTimeFormat.basicDateTime()));
+          fileNameSB
+              .append("-window-")
+              .append(DateTime.now().toString(ISODateTimeFormat.basicDateTime()));
         } else {
-          fileNameSB.append("-window-").append(
+          fileNameSB
+              .append("-window-")
+              .append(
                   window.maxTimestamp().toDateTime().toString(ISODateTimeFormat.basicDateTime()));
         }
       }
 
-      fileNameSB.append("-pane-").append(pane.getIndex())
-              .append("-shard-").append(shardIndex).append("-of-").append(numShards)
-              .append(".csv");
+      fileNameSB
+          .append("-pane-")
+          .append(pane.getIndex())
+          .append("-shard-")
+          .append(shardIndex)
+          .append("-of-")
+          .append(numShards)
+          .append(".csv");
 
       if (!compression.equals(Compression.UNCOMPRESSED)) {
         fileNameSB.append(".").append(compression.name().toLowerCase());
@@ -591,7 +615,5 @@ public class GCSParquetToCSV {
       LOG.debug("Windowed file name policy created: {}", fileNameSB.toString());
       return fileNameSB.toString();
     }
-
   }
-
 }

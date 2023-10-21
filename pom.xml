@@ -18,163 +18,163 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
+    <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.example.dataflow</groupId>
-  <artifactId>dataflow-ingestion</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+    <groupId>com.example.dataflow</groupId>
+    <artifactId>dataflow-ingestion</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
 
-  <packaging>pom</packaging>
+    <packaging>pom</packaging>
   
-  <modules>
-    <module>common</module>
-    <module>batch</module>
-    <module>streaming</module>
-  </modules>
+    <modules>
+        <module>common</module>
+        <module>batch</module>
+        <module>streaming</module>
+    </modules>
   
-  <properties>
-    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <java.version>11</java.version>
-    <!-- tool versions -->
-    <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
-    <maven-exec-plugin.version>1.6.0</maven-exec-plugin.version>
-    <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
-    <maven-shade-plugin.version>3.1.0</maven-shade-plugin.version>
-    <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
-    <!-- bom versions -->
-    <google-cloud-bom.version>0.157.0</google-cloud-bom.version>
-    <!-- library versions -->
-    <beam.version>2.36.0</beam.version>
-    <slf4j.version>1.7.30</slf4j.version>
-  </properties>
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <java.version>17</java.version>
+        <!-- tool versions -->
+        <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
+        <maven-exec-plugin.version>1.6.0</maven-exec-plugin.version>
+        <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
+        <maven-shade-plugin.version>3.1.0</maven-shade-plugin.version>
+        <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
+        <!-- bom versions -->
+        <google-cloud-bom.version>0.157.0</google-cloud-bom.version>
+        <!-- library versions -->
+        <beam.version>2.51.0</beam.version>
+        <slf4j.version>1.7.30</slf4j.version>
+    </properties>
     
-  <dependencyManagement>
+    <dependencyManagement>
     
-    <dependencies>
+        <dependencies>
       
-      <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-bom -->
-      <dependency>
-        <groupId>org.apache.beam</groupId>
-        <artifactId>beam-sdks-java-bom</artifactId>
-        <version>${beam.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-      
-      <dependency>    
-        <groupId>com.google.guava</groupId>
-        <artifactId>guava</artifactId>
-        <version>30.1-jre</version>
-      </dependency>
-
-      <dependency>
-        <groupId>com.google.cloud</groupId>
-        <artifactId>google-cloud-bigquery</artifactId>
-        <version>1.137.1</version>
-      </dependency>
-      
-      <!-- Add slf4j API frontend binding with JUL backend -->
-      <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-api</artifactId>
-        <version>${slf4j.version}</version>
-      </dependency>
-
-      <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-jdk14</artifactId>
-        <version>${slf4j.version}</version>
-        <!-- When loaded at runtime this will wire up slf4j to the JUL backend -->
-        <scope>runtime</scope>
-      </dependency>
-      
-      <dependency>
-        <groupId>junit</groupId>
-        <artifactId>junit</artifactId>
-        <version>4.13</version>
-        <scope>test</scope>
-      </dependency>
-
-    </dependencies>
-  </dependencyManagement>
-  
-  <build>
-    <resources>
-      <resource>
-        <filtering>false</filtering>
-        <directory>src/main/resources</directory>
-        <includes>
-          <include>**/*.properties</include>
-        </includes>
-      </resource>
-    </resources>
-    
-    <pluginManagement>
-      <plugins>
-        <plugin>
-          <groupId>org.codehaus.mojo</groupId>
-          <artifactId>exec-maven-plugin</artifactId>
-          <version>${maven-exec-plugin.version}</version>
-          <configuration>
-            <cleanupDaemonThreads>false</cleanupDaemonThreads>
-          </configuration>
-        </plugin>
-
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-compiler-plugin</artifactId>
-          <version>${maven-compiler-plugin.version}</version>
-          <configuration>
-            <source>${java.version}</source>
-            <target>${java.version}</target>
-            <showDeprecation>true</showDeprecation>
-            <compilerArgument>-Xlint:unchecked</compilerArgument>
-          </configuration>
-        </plugin>
-
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-surefire-plugin</artifactId>
-          <version>${maven-surefire-plugin.version}</version>
-          <configuration>
-            <parallel>all</parallel>
-            <threadCount>4</threadCount>
-            <redirectTestOutputToFile>true</redirectTestOutputToFile>
-            <systemProperties>
-              <property> 
-                <name>java.util.logging.config.file</name>
-                <value>src/test/resources/logging.properties</value>
-              </property>
-            </systemProperties>
-          </configuration>
-          <dependencies>
+            <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-bom -->
             <dependency>
-              <groupId>org.apache.maven.surefire</groupId>
-              <artifactId>surefire-junit47</artifactId>
-              <version>${maven-surefire-plugin.version}</version>
+                <groupId>org.apache.beam</groupId>
+                <artifactId>beam-sdks-java-bom</artifactId>
+                <version>${beam.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
-          </dependencies>
-        </plugin>
+      
+            <dependency>    
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>30.1-jre</version>
+            </dependency>
 
-        <!-- Ensure that the Maven jar plugin runs before the Maven
-        shade plugin by listing the plugin higher within the file. -->
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-jar-plugin</artifactId>
-          <version>${maven-jar-plugin.version}</version>
-        </plugin>
+            <dependency>
+                <groupId>com.google.cloud</groupId>
+                <artifactId>google-cloud-bigquery</artifactId>
+                <version>1.137.1</version>
+            </dependency>
+      
+            <!-- Add slf4j API frontend binding with JUL backend -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
 
-        <!--
-          Configures `mvn package` to produce a bundled jar ("fat jar") for runners
-          that require this for job submission to a cluster.
-        -->
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-shade-plugin</artifactId>
-          <version>${maven-shade-plugin.version}</version>
-        </plugin>
-      </plugins>
-    </pluginManagement>
-  </build>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-jdk14</artifactId>
+                <version>${slf4j.version}</version>
+                <!-- When loaded at runtime this will wire up slf4j to the JUL backend -->
+                <scope>runtime</scope>
+            </dependency>
+      
+            <dependency>
+                <groupId>junit</groupId>
+                <artifactId>junit</artifactId>
+                <version>4.13</version>
+                <scope>test</scope>
+            </dependency>
+
+        </dependencies>
+    </dependencyManagement>
+  
+    <build>
+        <resources>
+            <resource>
+                <filtering>false</filtering>
+                <directory>src/main/resources</directory>
+                <includes>
+                    <include>**/*.properties</include>
+                </includes>
+            </resource>
+        </resources>
+    
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <version>${maven-exec-plugin.version}</version>
+                    <configuration>
+                        <cleanupDaemonThreads>false</cleanupDaemonThreads>
+                    </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <source>${java.version}</source>
+                        <target>${java.version}</target>
+                        <showDeprecation>true</showDeprecation>
+                        <compilerArgument>-Xlint:unchecked</compilerArgument>
+                    </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${maven-surefire-plugin.version}</version>
+                    <configuration>
+                        <parallel>all</parallel>
+                        <threadCount>4</threadCount>
+                        <redirectTestOutputToFile>true</redirectTestOutputToFile>
+                        <systemProperties>
+                            <property> 
+                                <name>java.util.logging.config.file</name>
+                                <value>src/test/resources/logging.properties</value>
+                            </property>
+                        </systemProperties>
+                    </configuration>
+                    <dependencies>
+                        <dependency>
+                            <groupId>org.apache.maven.surefire</groupId>
+                            <artifactId>surefire-junit47</artifactId>
+                            <version>${maven-surefire-plugin.version}</version>
+                        </dependency>
+                    </dependencies>
+                </plugin>
+
+                <!-- Ensure that the Maven jar plugin runs before the Maven
+                shade plugin by listing the plugin higher within the file. -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>${maven-jar-plugin.version}</version>
+                </plugin>
+
+                <!--
+                  Configures `mvn package` to produce a bundled jar ("fat jar") for runners
+                  that require this for job submission to a cluster.
+                -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>${maven-shade-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 </project>
 
