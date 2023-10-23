@@ -38,7 +38,6 @@ import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
-import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Contextful;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.values.TypeDescriptor;
@@ -50,9 +49,9 @@ public class ProcessArbitraryAvroFiles {
 
     @Description("Input location for the AVRO files.")
     @Validation.Required
-    ValueProvider<String> getInputLocation();
+    String getFilesLocation();
 
-    void setInputLocation(ValueProvider<String> value);
+    void setFilesLocation(String value);
 
     @Description("Number of output files per original file.")
     @Default.Integer(10)
@@ -62,9 +61,9 @@ public class ProcessArbitraryAvroFiles {
 
     @Description("Output location for the processed Avro files.")
     @Validation.Required
-    ValueProvider<String> getOutputLocation();
+    String getOutputLocation();
 
-    void setOutputLocation(ValueProvider<String> value);
+    void setOutputLocation(String value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -73,23 +72,28 @@ public class ProcessArbitraryAvroFiles {
 
     pipeline
         .getCoderRegistry()
-        .registerCoderForClass(
-            ElementWithSchemaAndFilename.class, ElementWithSchemaAndFilenameCoder.of());
+        .registerCoderForType(
+            TypeDescriptor.of(ElementWithSchemaAndFilename.class),
+            ElementWithSchemaAndFilenameCoder.of());
     pipeline
         .getCoderRegistry()
-        .registerCoderForClass(ElementWithSchema.class, ElementWithSchemaCoder.of());
+        .registerCoderForType(
+            TypeDescriptor.of(ElementWithSchema.class), ElementWithSchemaCoder.of());
     pipeline
         .getCoderRegistry()
-        .registerCoderForClass(FilenameAndSchema.class, FilenameAndSchemaCoder.of());
+        .registerCoderForType(
+            TypeDescriptor.of(FilenameAndSchema.class), FilenameAndSchemaCoder.of());
 
     pipeline
-        .apply("MatchInputFiles", FileIO.match().filepattern(options.getInputLocation()))
+        .apply("MatchInputFiles", FileIO.match().filepattern(options.getFilesLocation()))
         .apply("ReadMatches", FileIO.readMatches())
         .apply(
             "ReadFilenamesWithSchemaAndRecord",
             GenericRecordAndFileInput.parseGenericRecords(
-                record -> parseGenericRecord(record),
-                outputParams -> createOutputElement(outputParams)))
+                ProcessArbitraryAvroFiles::parseAvroToElementWithSchema,
+                ElementWithSchemaCoder.of(),
+                ProcessArbitraryAvroFiles::readOutputAsElementWithSchemaAndFilename,
+                ElementWithSchemaAndFilenameCoder.of()))
         .apply(
             "ProcessData",
             MapElements.into(TypeDescriptor.of(ElementWithSchemaAndFilename.class)).via((kv) -> kv))
@@ -104,8 +108,9 @@ public class ProcessArbitraryAvroFiles {
                 .withNaming(
                     filenameAndSchema ->
                         FileIO.Write.defaultNaming(filenameAndSchema.fileName(), ".avsc"))
-                .withNumShards(options.getNumShards()));
-    
+                .withNumShards(options.getNumShards())
+                .withDestinationCoder(FilenameAndSchemaCoder.of()));
+
     pipeline.run();
   }
 
@@ -113,7 +118,7 @@ public class ProcessArbitraryAvroFiles {
     return AvroIO.<GenericRecord>sink(new Schema.Parser().parse(fileNameAndSchema.avroSchema()));
   }
 
-  static ElementWithSchemaAndFilename createOutputElement(
+  static ElementWithSchemaAndFilename readOutputAsElementWithSchemaAndFilename(
       GenericRecordAndFileInput.OutputFromFileArguments<ElementWithSchema> outputParams) {
     var element = outputParams.reader().getCurrent();
     var fileName = outputParams.file().getMetadata().resourceId().getFilename();
@@ -121,7 +126,7 @@ public class ProcessArbitraryAvroFiles {
         fileName, element.avroSchema(), element.encodedGenericRecord());
   }
 
-  static ElementWithSchema parseGenericRecord(GenericRecord record) {
+  static ElementWithSchema parseAvroToElementWithSchema(GenericRecord record) {
     try {
       var schema = record.getSchema();
       var outputStream = new ByteArrayOutputStream();
@@ -133,7 +138,7 @@ public class ProcessArbitraryAvroFiles {
 
       return new ElementWithSchema(schema.toString(), outputStream.toByteArray());
     } catch (IOException ex) {
-      throw new RuntimeException(ex);
+      throw new RuntimeException("Error while encoding the read record.", ex);
     }
   }
 

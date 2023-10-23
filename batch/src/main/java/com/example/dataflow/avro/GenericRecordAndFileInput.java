@@ -52,6 +52,10 @@ public abstract class GenericRecordAndFileInput<ParseT, OutputT>
 
   abstract SerializableFunction<OutputFromFileArguments<ParseT>, OutputT> getOutputFn();
 
+  abstract Coder<ParseT> getParseCoder();
+
+  abstract Coder<OutputT> getOutputCoder();
+
   abstract long getDesiredBundleSizeBytes();
 
   public abstract Builder<ParseT, OutputT> toBuilder();
@@ -66,52 +70,36 @@ public abstract class GenericRecordAndFileInput<ParseT, OutputT>
     public abstract Builder<ParseT, OutputT> setOutputFn(
         SerializableFunction<OutputFromFileArguments<ParseT>, OutputT> outputFn);
 
+    public abstract Builder<ParseT, OutputT> setOutputCoder(Coder<OutputT> outputCoder);
+
+    public abstract Builder<ParseT, OutputT> setParseCoder(Coder<ParseT> parseCoder);
+
     public abstract GenericRecordAndFileInput<ParseT, OutputT> build();
   }
 
   public static <ParseT, OutputT> GenericRecordAndFileInput<ParseT, OutputT> parseGenericRecords(
       SerializableFunction<GenericRecord, ParseT> parseFn,
-      SerializableFunction<OutputFromFileArguments<ParseT>, OutputT> outputFn) {
+      Coder<ParseT> parseOutputCoder,
+      SerializableFunction<OutputFromFileArguments<ParseT>, OutputT> outputFn,
+      Coder<OutputT> outputCoder) {
     return new AutoValue_GenericRecordAndFileInput.Builder<ParseT, OutputT>()
         .setParseFn(parseFn)
         .setOutputFn(outputFn)
+        .setParseCoder(parseOutputCoder)
+        .setOutputCoder(outputCoder)
         .setDesiredBundleSizeBytes(DEFAULT_BUNDLE_SIZE_BYTES)
         .build();
   }
 
-  private static <T> Coder<T> inferCoder(
-      SerializableFunction<GenericRecord, T> parseFn, CoderRegistry coderRegistry) {
-    try {
-      return coderRegistry.getCoder(TypeDescriptors.outputOf(parseFn));
-    } catch (CannotProvideCoderException e) {
-      throw new IllegalArgumentException(
-          "Unable to infer coder for output of parseFn. Specify it explicitly using withCoder().",
-          e);
-    }
-  }
-
-  private static <ParseT, OutputT> Coder<OutputT> inferCoderOutput(
-      SerializableFunction<ParseT, OutputT> outputFn, CoderRegistry coderRegistry) {
-    try {
-      return coderRegistry.getCoder(TypeDescriptors.outputOf(outputFn));
-    } catch (CannotProvideCoderException e) {
-      throw new IllegalArgumentException(
-          "Unable to infer coder for output of parseFn. Specify it explicitly using withCoder().",
-          e);
-    }
-  }
-
   @Override
   public PCollection<OutputT> expand(PCollection<FileIO.ReadableFile> input) {
-    var parseFnCoder = inferCoder(getParseFn(), input.getPipeline().getCoderRegistry());
     final SerializableFunction<GenericRecord, ParseT> parseFn = getParseFn();
     final SerializableFunction<String, FileBasedSource<ParseT>> createSource =
-        new CreateParseSourceFn<>(parseFn, parseFnCoder);
-    var resultCoder = inferCoderOutput(getOutputFn(), input.getPipeline().getCoderRegistry());
+        new CreateParseSourceFn<>(parseFn, getParseCoder());
     return input.apply(
         "Parse Files via FileBasedSource",
         new ReadAllFilesAndRecordsViaFileBasedSource<>(
-            getOutputFn(), getDesiredBundleSizeBytes(), createSource, resultCoder));
+            getOutputFn(), getDesiredBundleSizeBytes(), createSource, getOutputCoder()));
   }
 
   static class CreateParseSourceFn<H> implements SerializableFunction<String, FileBasedSource<H>> {

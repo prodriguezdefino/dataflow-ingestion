@@ -50,6 +50,9 @@ public interface Types {
     public FilenameAndSchema decode(InputStream inStream) throws CoderException, IOException {
       return new FilenameAndSchema(stringCoder.decode(inStream), stringCoder.decode(inStream));
     }
+
+    @Override
+    public void verifyDeterministic() throws NonDeterministicException {}
   }
 
   record ElementWithSchema(String avroSchema, byte[] encodedGenericRecord) {}
@@ -77,6 +80,9 @@ public interface Types {
     public ElementWithSchema decode(InputStream inStream) throws CoderException, IOException {
       return new ElementWithSchema(stringCoder.decode(inStream), binaryCoder.decode(inStream));
     }
+
+    @Override
+    public void verifyDeterministic() throws NonDeterministicException {}
   }
 
   record ElementWithSchemaAndFilename(
@@ -109,5 +115,8 @@ public interface Types {
       return new ElementWithSchemaAndFilename(
           stringCoder.decode(inStream), stringCoder.decode(inStream), binaryCoder.decode(inStream));
     }
+
+    @Override
+    public void verifyDeterministic() throws NonDeterministicException {}
   }
 }
