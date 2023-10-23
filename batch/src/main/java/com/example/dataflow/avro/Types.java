@@ -22,6 +22,7 @@ import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarLongCoder;
 
 /** Collection of types and their coders used by the pipeline execution. */
 public interface Types {
@@ -86,13 +87,14 @@ public interface Types {
   }
 
   record ElementWithSchemaAndFilename(
-      String fileName, String avroSchema, byte[] encodedGenericRecord) {}
+      String fileName, Long fileSize, String avroSchema, byte[] encodedGenericRecord) {}
 
   static class ElementWithSchemaAndFilenameCoder extends CustomCoder<ElementWithSchemaAndFilename> {
 
     static final ElementWithSchemaAndFilenameCoder INSTANCE =
         new ElementWithSchemaAndFilenameCoder();
     static final StringUtf8Coder stringCoder = StringUtf8Coder.of();
+    static final VarLongCoder longCoder = VarLongCoder.of();
     static final ByteArrayCoder binaryCoder = ByteArrayCoder.of();
 
     private ElementWithSchemaAndFilenameCoder() {}
@@ -105,6 +107,7 @@ public interface Types {
     public void encode(ElementWithSchemaAndFilename value, OutputStream outStream)
         throws CoderException, IOException {
       stringCoder.encode(value.fileName(), outStream);
+      longCoder.encode(value.fileSize(), outStream);
       stringCoder.encode(value.avroSchema(), outStream);
       binaryCoder.encode(value.encodedGenericRecord(), outStream);
     }
@@ -113,7 +116,10 @@ public interface Types {
     public ElementWithSchemaAndFilename decode(InputStream inStream)
         throws CoderException, IOException {
       return new ElementWithSchemaAndFilename(
-          stringCoder.decode(inStream), stringCoder.decode(inStream), binaryCoder.decode(inStream));
+          stringCoder.decode(inStream),
+          longCoder.decode(inStream),
+          stringCoder.decode(inStream),
+          binaryCoder.decode(inStream));
     }
 
     @Override

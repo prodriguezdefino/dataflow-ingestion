@@ -39,7 +39,11 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.transforms.Contextful;
+import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
 
 /** */
@@ -53,17 +57,17 @@ public class ProcessArbitraryAvroFiles {
 
     void setFilesLocation(String value);
 
-    @Description("Number of output files per original file.")
-    @Default.Integer(10)
-    Integer getNumShards();
-
-    void setNumShards(Integer value);
-
     @Description("Output location for the processed Avro files.")
     @Validation.Required
     String getOutputLocation();
 
     void setOutputLocation(String value);
+
+    @Description("File size threshold we will use to decide if spliting the output files.")
+    @Default.Long(37 * 1024 * 1024L)
+    Long getFileSizeThreshold();
+
+    void setFileSizeThreshold(Long size);
   }
 
   public static void main(String[] args) throws Exception {
@@ -84,34 +88,60 @@ public class ProcessArbitraryAvroFiles {
         .registerCoderForType(
             TypeDescriptor.of(FilenameAndSchema.class), FilenameAndSchemaCoder.of());
 
-    pipeline
-        .apply("MatchInputFiles", FileIO.match().filepattern(options.getFilesLocation()))
-        .apply("ReadMatches", FileIO.readMatches())
-        .apply(
-            "ReadFilenamesWithSchemaAndRecord",
-            GenericRecordAndFileInput.parseGenericRecords(
-                ProcessArbitraryAvroFiles::parseAvroToElementWithSchema,
-                ElementWithSchemaCoder.of(),
-                ProcessArbitraryAvroFiles::readOutputAsElementWithSchemaAndFilename,
-                ElementWithSchemaAndFilenameCoder.of()))
-        .apply(
-            "ProcessData",
-            MapElements.into(TypeDescriptor.of(ElementWithSchemaAndFilename.class)).via((kv) -> kv))
-        .apply(
-            "WriteToDestination",
-            FileIO.<FilenameAndSchema, ElementWithSchemaAndFilename>writeDynamic()
-                .by(element -> new FilenameAndSchema(element.fileName(), element.avroSchema()))
-                .via(
-                    Contextful.fn(element -> serializeElement(element)),
-                    Contextful.fn(fileNameAndSchema -> createSink(fileNameAndSchema)))
-                .to(options.getOutputLocation())
-                .withNaming(
-                    filenameAndSchema ->
-                        FileIO.Write.defaultNaming(filenameAndSchema.fileName(), ".avsc"))
-                .withNumShards(options.getNumShards())
-                .withDestinationCoder(FilenameAndSchemaCoder.of()));
+    var writeBranches =
+        pipeline
+            .apply("MatchInputFiles", FileIO.match().filepattern(options.getFilesLocation()))
+            .apply("ReadMatches", FileIO.readMatches())
+            .apply(
+                "ReadFilenamesWithSchemaAndRecord",
+                GenericRecordAndFileInput.parseGenericRecords(
+                    ProcessArbitraryAvroFiles::parseAvroToElementWithSchema,
+                    ElementWithSchemaCoder.of(),
+                    ProcessArbitraryAvroFiles::readOutputAsElementWithSchemaAndFilename,
+                    ElementWithSchemaAndFilenameCoder.of()))
+            .apply(
+                "ProcessData",
+                MapElements.into(TypeDescriptor.of(ElementWithSchemaAndFilename.class))
+                    .via((kv) -> kv))
+            .apply(
+                "DecideSplit",
+                ParDo.of(new DecideIfSplitNeeded(options.getFileSizeThreshold()))
+                    .withOutputTags(
+                        DecideIfSplitNeeded.largerThanThreshold,
+                        TupleTagList.of(DecideIfSplitNeeded.smallerThanThreshold)));
+
+    writeBranches
+        .get(DecideIfSplitNeeded.largerThanThreshold)
+        .apply("WriteToSplittedDestination", createWriteDestination(options, true));
+
+    writeBranches
+        .get(DecideIfSplitNeeded.smallerThanThreshold)
+        .apply("WriteToDestination", createWriteDestination(options, false));
 
     pipeline.run();
+  }
+
+  static FileIO.Write<FilenameAndSchema, ElementWithSchemaAndFilename> createWriteDestination(
+      Options options, boolean shouldSplit) {
+
+    var write =
+        FileIO.<FilenameAndSchema, ElementWithSchemaAndFilename>writeDynamic()
+            .by(element -> new FilenameAndSchema(element.fileName(), element.avroSchema()))
+            .via(
+                Contextful.fn(element -> serializeElement(element)),
+                Contextful.fn(fileNameAndSchema -> createSink(fileNameAndSchema)))
+            .to(options.getOutputLocation())
+            .withNaming(
+                filenameAndSchema ->
+                    FileIO.Write.defaultNaming(filenameAndSchema.fileName(), ".avsc"))
+            .withDestinationCoder(FilenameAndSchemaCoder.of());
+
+    if (!shouldSplit) {
+      // we want the same file as input if the file is smaller then threshold.
+      write = write.withNumShards(1);
+    }
+
+    return write;
   }
 
   static FileIO.Sink<GenericRecord> createSink(FilenameAndSchema fileNameAndSchema) {
@@ -122,8 +152,9 @@ public class ProcessArbitraryAvroFiles {
       GenericRecordAndFileInput.OutputFromFileArguments<ElementWithSchema> outputParams) {
     var element = outputParams.reader().getCurrent();
     var fileName = outputParams.file().getMetadata().resourceId().getFilename();
+    var fileSize = outputParams.file().getMetadata().sizeBytes();
     return new ElementWithSchemaAndFilename(
-        fileName, element.avroSchema(), element.encodedGenericRecord());
+        fileName, fileSize, element.avroSchema(), element.encodedGenericRecord());
   }
 
   static ElementWithSchema parseAvroToElementWithSchema(GenericRecord record) {
@@ -157,6 +188,28 @@ public class ProcessArbitraryAvroFiles {
               new ByteArrayInputStream(element.encodedGenericRecord()).toString(),
               element.avroSchema()),
           e);
+    }
+  }
+
+  static class DecideIfSplitNeeded
+      extends DoFn<ElementWithSchemaAndFilename, ElementWithSchemaAndFilename> {
+
+    static final TupleTag<ElementWithSchemaAndFilename> largerThanThreshold = new TupleTag<>() {};
+    static final TupleTag<ElementWithSchemaAndFilename> smallerThanThreshold = new TupleTag<>() {};
+
+    private final long thresholdValue;
+
+    public DecideIfSplitNeeded(long thresholdValue) {
+      this.thresholdValue = thresholdValue;
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext context) {
+      if (context.element().fileSize() >= thresholdValue) {
+        context.output(largerThanThreshold, context.element());
+      } else {
+        context.output(smallerThanThreshold, context.element());
+      }
     }
   }
 }
