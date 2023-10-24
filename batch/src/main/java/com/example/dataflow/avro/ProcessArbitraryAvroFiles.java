@@ -64,7 +64,7 @@ public class ProcessArbitraryAvroFiles {
     void setOutputLocation(String value);
 
     @Description("File size threshold we will use to decide if spliting the output files.")
-    @Default.Long(37 * 1024 * 1024L)
+    @Default.Long(100 * 1024 * 1024L)
     Long getFileSizeThreshold();
 
     void setFileSizeThreshold(Long size);
