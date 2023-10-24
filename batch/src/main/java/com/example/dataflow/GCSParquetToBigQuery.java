@@ -308,7 +308,7 @@ public class GCSParquetToBigQuery {
                       BQ_INSERT_TIMESTAMP_FIELDNAME);
 
       LOG.info("AVRO schema with timestamp {}", timestampedSchemaStr);
-      LOG.info("BQ schema with timestamp {}", bqSchema.toPrettyString());
+      LOG.info("BQ schema with timestamp {}", bqSchema.toString());
 
       var tsRecords = records
               .apply("AddTSToRecord",

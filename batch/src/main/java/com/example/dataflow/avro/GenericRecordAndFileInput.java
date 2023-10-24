@@ -16,18 +16,20 @@
 package com.example.dataflow.avro;
 
 import com.google.auto.value.AutoValue;
+import java.io.IOException;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.extensions.avro.io.AvroSource;
+import org.apache.beam.sdk.io.AvroSource;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.FileBasedSource;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.ReadAllViaFileBasedSource;
-import org.apache.beam.sdk.io.ReadAllViaFileBasedSourceTransform;
-import static org.apache.beam.sdk.io.ReadAllViaFileBasedSourceTransform.DEFAULT_USES_RESHUFFLE;
+import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -91,7 +93,7 @@ public abstract class GenericRecordAndFileInput<ParseT, OutputT>
   @Override
   public PCollection<OutputT> expand(PCollection<FileIO.ReadableFile> input) {
     final SerializableFunction<GenericRecord, ParseT> parseFn = getParseFn();
-    final SerializableFunction<String, FileBasedSource<ParseT>> createSource =
+    final SerializableFunction<String, AvroSource<ParseT>> createSource =
         new CreateParseSourceFn<>(parseFn, getParseCoder());
     return input.apply(
         "Parse Files via FileBasedSource",
@@ -99,7 +101,7 @@ public abstract class GenericRecordAndFileInput<ParseT, OutputT>
             getOutputFn(), getDesiredBundleSizeBytes(), createSource, getOutputCoder()));
   }
 
-  static class CreateParseSourceFn<H> implements SerializableFunction<String, FileBasedSource<H>> {
+  static class CreateParseSourceFn<H> implements SerializableFunction<String, AvroSource<H>> {
     private final SerializableFunction<GenericRecord, H> parseFn;
     private final Coder<H> coder;
 
@@ -109,52 +111,99 @@ public abstract class GenericRecordAndFileInput<ParseT, OutputT>
     }
 
     @Override
-    public FileBasedSource<H> apply(String input) {
+    public AvroSource<H> apply(String input) {
       return AvroSource.from(input).withParseFn(parseFn, coder);
     }
   }
 
   static class ReadAllFilesAndRecordsViaFileBasedSource<S, OutputT>
-      extends ReadAllViaFileBasedSourceTransform<S, OutputT> {
+      extends PTransform<PCollection<FileIO.ReadableFile>, PCollection<OutputT>> {
+    protected static final boolean DEFAULT_USES_RESHUFFLE = true;
+
     private final SerializableFunction<OutputFromFileArguments<S>, OutputT> outputFn;
+    private final Coder<OutputT> outputCoder;
+    private final long desiredBundleSizeBytes;
+    private final SerializableFunction<String, AvroSource<S>> createSource;
+    private final ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler exceptionHandler;
 
     public ReadAllFilesAndRecordsViaFileBasedSource(
         final SerializableFunction<OutputFromFileArguments<S>, OutputT> outputFn,
         long desiredBundleSizeBytes,
-        SerializableFunction<String, ? extends FileBasedSource<S>> createSource,
+        SerializableFunction<String, AvroSource<S>> createSource,
         Coder<OutputT> coder) {
-      super(
-          desiredBundleSizeBytes,
-          createSource,
-          coder,
-          DEFAULT_USES_RESHUFFLE,
-          new ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler());
+      this.createSource = createSource;
+      this.desiredBundleSizeBytes = desiredBundleSizeBytes;
       this.outputFn = outputFn;
+      this.outputCoder = coder;
+      this.exceptionHandler = new ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler();
     }
 
     @Override
-    protected DoFn<KV<FileIO.ReadableFile, OffsetRange>, OutputT> readRangesFn() {
-      return new ReadFileRangesFn<>(outputFn, createSource, exceptionHandler);
+    public PCollection<OutputT> expand(PCollection<FileIO.ReadableFile> input) {
+      PCollection<KV<FileIO.ReadableFile, OffsetRange>> ranges =
+          input.apply("Split into ranges", ParDo.of(new SplitIntoRangesFn(desiredBundleSizeBytes)));
+      ranges = ranges.apply("Reshuffle", Reshuffle.viaRandomKey());
+      return ranges
+          .apply(
+              "Read ranges",
+              ParDo.of(new ReadFileRangesFn<>(outputFn, createSource, exceptionHandler)))
+          .setCoder(outputCoder);
     }
 
-    private static class ReadFileRangesFn<K, OutputT> extends AbstractReadFileRangesFn<K, OutputT> {
-      private final SerializableFunction<OutputFromFileArguments<K>, OutputT> outputFn;
+    private static class SplitIntoRangesFn
+        extends DoFn<FileIO.ReadableFile, KV<FileIO.ReadableFile, OffsetRange>> {
+      private final long desiredBundleSizeBytes;
 
-      public ReadFileRangesFn(
-          final SerializableFunction<OutputFromFileArguments<K>, OutputT> outputFn,
-          final SerializableFunction<String, ? extends FileBasedSource<K>> createSource,
-          final ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler exceptionHandler) {
-        super(createSource, exceptionHandler);
+      private SplitIntoRangesFn(long desiredBundleSizeBytes) {
+        this.desiredBundleSizeBytes = desiredBundleSizeBytes;
+      }
+
+      @ProcessElement
+      public void process(ProcessContext c) {
+        MatchResult.Metadata metadata = c.element().getMetadata();
+        if (!metadata.isReadSeekEfficient()) {
+          c.output(KV.of(c.element(), new OffsetRange(0, metadata.sizeBytes())));
+          return;
+        }
+        for (OffsetRange range :
+            new OffsetRange(0, metadata.sizeBytes()).split(desiredBundleSizeBytes, 0)) {
+          c.output(KV.of(c.element(), range));
+        }
+      }
+    }
+
+    private static class ReadFileRangesFn<K, T>
+        extends DoFn<KV<FileIO.ReadableFile, OffsetRange>, T> {
+      private final SerializableFunction<String, AvroSource<K>> createSource;
+      private final ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler exceptionHandler;
+      private final SerializableFunction<OutputFromFileArguments<K>, T> outputFn;
+
+      ReadFileRangesFn(
+          final SerializableFunction<OutputFromFileArguments<K>, T> outputFn,
+          SerializableFunction<String, AvroSource<K>> createSource,
+          ReadAllViaFileBasedSource.ReadFileRangesFnExceptionHandler exceptionHandler) {
+        this.createSource = createSource;
+        this.exceptionHandler = exceptionHandler;
         this.outputFn = outputFn;
       }
 
-      @Override
-      protected OutputT makeOutput(
-          final FileIO.ReadableFile file,
-          final OffsetRange range,
-          final FileBasedSource<K> fileBasedSource,
-          final BoundedSource.BoundedReader<K> reader) {
-        return outputFn.apply(new OutputFromFileArguments<>(file, range, fileBasedSource, reader));
+      @ProcessElement
+      public void process(ProcessContext c) throws IOException {
+        var file = c.element().getKey();
+        var range = c.element().getValue();
+        var source = createSource.apply(file.getMetadata().resourceId().toString());
+        try (BoundedSource.BoundedReader<K> reader =
+            source
+                .createForSubrangeOfFile(file.getMetadata(), range.getFrom(), range.getTo())
+                .createReader(c.getPipelineOptions())) {
+          for (boolean more = reader.start(); more; more = reader.advance()) {
+            c.output(outputFn.apply(new OutputFromFileArguments<>(file, range, source, reader)));
+          }
+        } catch (RuntimeException e) {
+          if (exceptionHandler.apply(file, range, e)) {
+            throw e;
+          }
+        }
       }
     }
   }
