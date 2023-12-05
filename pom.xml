@@ -34,7 +34,7 @@
   
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <java.version>17</java.version>
+        <java.version>21</java.version>
         <!-- tool versions -->
         <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
         <maven-exec-plugin.version>1.6.0</maven-exec-plugin.version>
@@ -44,7 +44,7 @@
         <!-- bom versions -->
         <google-cloud-bom.version>0.157.0</google-cloud-bom.version>
         <!-- library versions -->
-        <beam.version>2.51.0</beam.version>
+        <beam.version>2.52.0</beam.version>
         <slf4j.version>1.7.30</slf4j.version>
     </properties>
     
